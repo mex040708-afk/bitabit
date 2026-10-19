@@ -28,6 +28,7 @@ type Versions struct {
 	OriginalExt string // "flac", o la extensión de la fuente con pérdida
 	AudioMD5    string // MD5 de STREAMINFO en hexadecimal; "" si no consta
 	AAC         string // ruta de aac.m4a; "" si la fuente tiene pérdida
+	AACInfo     Info   // lo que Probe dijo del AAC; vacío si no hay AAC
 }
 
 // BuildVersions prepara en workDir el original y, si la fuente no tiene
@@ -61,7 +62,7 @@ func BuildVersions(ctx context.Context, src string, info Info, workDir string) (
 		return Versions{}, err
 	}
 	if info.Lossless {
-		if v.AAC, err = encodeAAC(ctx, v.Original, info, workDir); err != nil {
+		if v.AAC, v.AACInfo, err = encodeAAC(ctx, v.Original, info, workDir); err != nil {
 			return Versions{}, err
 		}
 	}
@@ -149,7 +150,7 @@ func encodeFLAC(ctx context.Context, src string, info Info, workDir string) (Ver
 }
 
 // encodeAAC genera la versión para datos móviles a partir del original.
-func encodeAAC(ctx context.Context, original string, info Info, workDir string) (string, error) {
+func encodeAAC(ctx context.Context, original string, info Info, workDir string) (string, Info, error) {
 	dst := filepath.Join(workDir, "aac.m4a")
 	args := append([]string{"-nostdin", "-v", "error", "-y"}, ffmpegInput(original)...)
 	args = append(args, "-map", "0:a:0", "-c:a", "aac", "-b:a", "256k")
@@ -161,17 +162,17 @@ func encodeAAC(ctx context.Context, original string, info Info, workDir string) 
 	}
 	args = append(args, "-movflags", "+faststart", "-f", "ipod", ffmpegPath(dst))
 	if _, err := runTool(ctx, encodeTimeout, maxToolOutput, "ffmpeg", args...); err != nil {
-		return "", err
+		return "", Info{}, err
 	}
 
 	got, err := Probe(ctx, dst)
 	if err != nil {
-		return "", fmt.Errorf("comprobar el AAC: %w", err)
+		return "", Info{}, fmt.Errorf("comprobar el AAC: %w", err)
 	}
 	if diff := got.Duration - info.Duration; got.Codec != "aac" || diff < -aacDurationSlack || diff > aacDurationSlack {
-		return "", fmt.Errorf("%w: el AAC salió mal: %s de %v, y la fuente dura %v", ErrUnreadable, got.Codec, got.Duration, info.Duration)
+		return "", Info{}, fmt.Errorf("%w: el AAC salió mal: %s de %v, y la fuente dura %v", ErrUnreadable, got.Codec, got.Duration, info.Duration)
 	}
-	return dst, nil
+	return dst, got, nil
 }
 
 // aacSampleRate deja la frecuencia hasta 48 kHz. Por encima, el móvil no gana
