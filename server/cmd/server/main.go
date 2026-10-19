@@ -7,7 +7,7 @@
 // Configuración por variables de entorno:
 //
 //	BITABIT_DATABASE_URL  cadena de conexión a PostgreSQL
-//	                      (en el servidor: "host=/var/run/postgresql dbname=bitabit")
+//	                      (en el servidor: postgres:///bitabit?host=/var/run/postgresql)
 //	BITABIT_DATA_DIR      carpeta con entrada/, biblioteca/ y fallidos/ (ruta absoluta)
 //	BITABIT_MEDIA_KEYS    claves de los enlaces: "kid:clave,…" en base64url
 //	BITABIT_HTTP_ADDR     dónde escucha el HTTP (por defecto 127.0.0.1:8080)
