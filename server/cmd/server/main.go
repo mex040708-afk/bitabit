@@ -46,16 +46,19 @@ const (
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	var err error
+	failure := "el servidor se detiene"
 	switch {
 	case len(os.Args) == 1 || (len(os.Args) == 2 && os.Args[1] == "serve"):
 		err = serve(log)
 	case os.Args[1] == "link":
+		failure = "no se pudo crear el enlace"
 		err = printLink(os.Args[2:])
 	default:
+		failure = "orden desconocida"
 		err = errors.New(usage)
 	}
 	if err != nil {
-		log.Error("el servidor se detiene", "error", err)
+		log.Error(failure, "error", err)
 		os.Exit(1)
 	}
 }
