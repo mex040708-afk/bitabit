@@ -116,6 +116,27 @@ func TestProbeFormats(t *testing.T) {
 	}
 }
 
+// pipedFLAC genera un FLAC escribiéndolo a una tubería, como haría una
+// grabación en directo.
+func pipedFLAC(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "tuberia.flac")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=2",
+		"-c:a", "flac", "-f", "flac", "pipe:1")
+	cmd.Stdout = f
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("ffmpeg: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestProbeRejectsBadFiles(t *testing.T) {
 	needFFmpeg(t)
 	dir := t.TempDir()
@@ -142,6 +163,8 @@ func TestProbeRejectsBadFiles(t *testing.T) {
 			"-map", "0:a", "-map", "1:a", "-c:a", "aac")},
 		{"sin pista de audio", ffmpeg(t, dir, "video.m4a",
 			"-f", "lavfi", "-i", "color=c=black:s=16x16:d=1", "-c:v", "mpeg4")},
+		// El codificador no puede volver atrás a escribir el número de muestras.
+		{"FLAC escrito a una tubería, sin duración", pipedFLAC(t, dir)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.desc, func(t *testing.T) {

@@ -1,14 +1,11 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,17 +16,12 @@ import (
 const (
 	probeTimeout   = 30 * time.Second
 	maxProbeOutput = 1 << 20
-	maxProbeStderr = 4 << 10
 	maxTagRunes    = 512
 	maxTagNumber   = 9999
 	// maxDuration descarta duraciones absurdas antes de pasarlas a
 	// time.Duration, que se desbordaría.
 	maxDuration = 1e6 // segundos, unos 11 días
 )
-
-// ErrUnreadable indica que el problema es el archivo y no el sistema: se mueve a
-// fallidos/ en vez de reintentarlo.
-var ErrUnreadable = errors.New("archivo de audio no válido")
 
 var losslessCodecs = map[string]bool{
 	"flac":      true,
@@ -86,45 +78,18 @@ func Probe(ctx context.Context, file string) (Info, error) {
 		return Info{}, fmt.Errorf("probe: %w", err)
 	}
 
-	tctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	stdout := &cappedBuffer{max: maxProbeOutput}
-	stderr := &cappedBuffer{max: maxProbeStderr}
-	cmd := exec.CommandContext(tctx, "ffprobe",
+	args := []string{
 		"-v", "error",
-		// Solo archivos locales y solo estos contenedores: un .m4a que sea una
-		// lista HLS no consigue que ffprobe pida URLs.
-		"-protocol_whitelist", "file",
-		"-format_whitelist", "flac,wav,aiff,mp3,mov,ogg",
 		"-select_streams", "a",
-		"-show_entries", "stream=codec_name,sample_rate,channels,bits_per_sample,bits_per_raw_sample,duration"+
+		"-show_entries", "stream=codec_name,sample_rate,channels,bits_per_sample,bits_per_raw_sample,duration" +
 			":stream_tags:format=duration,bit_rate:format_tags",
 		"-of", "json",
-		// Con file: delante, ningún nombre se toma por otro protocolo (concat:,
-		// http:), y al ser absoluta tampoco por una opción.
-		"file:"+filepath.ToSlash(file),
-	)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return Info{}, fmt.Errorf("probe: %w", ctx.Err())
 	}
-	if errors.Is(tctx.Err(), context.DeadlineExceeded) {
-		return Info{}, fmt.Errorf("%w: ffprobe tardó más de %v", ErrUnreadable, probeTimeout)
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return Info{}, fmt.Errorf("%w: ffprobe: %s", ErrUnreadable, firstLine(stderr.String()))
-	}
+	out, err := runTool(ctx, probeTimeout, maxProbeOutput, "ffprobe", append(args, ffmpegInput(file)...)...)
 	if err != nil {
-		return Info{}, fmt.Errorf("probe: ejecutar ffprobe: %w", err)
+		return Info{}, err
 	}
-	if stdout.truncated {
-		return Info{}, fmt.Errorf("%w: la salida de ffprobe pasa de %d bytes", ErrUnreadable, maxProbeOutput)
-	}
-	return parseProbe(stdout.Bytes())
+	return parseProbe(out)
 }
 
 type probeOutput struct {
@@ -278,31 +243,4 @@ func parseSeconds(s string) time.Duration {
 		return 0
 	}
 	return time.Duration(f * float64(time.Second))
-}
-
-func firstLine(s string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
-	return strings.TrimSpace(line)
-}
-
-// cappedBuffer guarda hasta max bytes y descarta el resto sin fallar, para que
-// ffprobe no se quede bloqueado escribiendo. Después se mira truncated.
-type cappedBuffer struct {
-	bytes.Buffer
-	max       int
-	truncated bool
-}
-
-func (b *cappedBuffer) Write(p []byte) (int, error) {
-	room := b.max - b.Len()
-	if len(p) <= room {
-		return b.Buffer.Write(p)
-	}
-	b.truncated = true
-	if room > 0 {
-		if _, err := b.Buffer.Write(p[:room]); err != nil {
-			return 0, err
-		}
-	}
-	return len(p), nil
 }
