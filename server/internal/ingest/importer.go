@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mex040708-afk/bitabit/server/internal/db"
+	"github.com/mex040708-afk/bitabit/server/internal/library"
 )
 
 const (
@@ -477,14 +478,11 @@ func (im *Importer) Recover(ctx context.Context) ([]string, error) {
 }
 
 func (im *Importer) versionDir(quality string) string {
-	if quality == db.QualityAAC256 {
-		return filepath.Join(im.library, "aac")
-	}
-	return filepath.Join(im.library, "orig")
+	return filepath.Join(im.library, library.Dir(quality))
 }
 
 func (im *Importer) versionPath(quality string, id int64, ext string) string {
-	return filepath.Join(im.versionDir(quality), strconv.FormatInt(id, 10)+"."+ext)
+	return filepath.Join(im.library, filepath.FromSlash(library.File(quality, id, ext)))
 }
 
 // hashFile devuelve el SHA-256 y el tamaño de un archivo.
