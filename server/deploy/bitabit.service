@@ -1,0 +1,55 @@
+# Servicio de Bitabit: importa lo que llega a entrada/ y sirve /media.
+# Lo instala install-service.sh. La configuración está en /etc/bitabit/env.
+
+[Unit]
+Description=Bitabit, streaming de música casero
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=exec
+User=bitabit
+Group=bitabit
+EnvironmentFile=/etc/bitabit/env
+ExecStart=/usr/local/bin/bitabit serve
+Restart=on-failure
+RestartSec=5
+# El HTTP espera hasta 10 s a las peticiones en curso al pararse.
+TimeoutStopSec=30
+
+# Endurecimiento: solo puede escribir en la carpeta de datos.
+# Si BITABIT_DATA_DIR cambia, hay que cambiar también ReadWritePaths.
+# La red no se restringe por IP: en el servidor real escucha a internet.
+ProtectSystem=strict
+ReadWritePaths=/srv/bitabit
+PrivateTmp=yes
+ProtectHome=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectProc=invisible
+ProcSubset=pid
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+# Las llamadas fuera del filtro devuelven EPERM en vez de matar el proceso:
+# Go intenta subir el límite de archivos abiertos (@resources) y sigue si no puede.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

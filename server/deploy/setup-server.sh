@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepara un Ubuntu 24.04 para ejecutar Bitabit: paquetes, usuario de
-# servicio, carpetas de datos y base de datos. Se puede repetir sin romper nada.
+# servicio, carpetas de datos, base de datos y /etc/bitabit/env. Se puede repetir
+# sin romper nada. Después, install-service.sh instala el binario y el servicio.
 #
 # Uso: sudo ./setup-server.sh [carpeta de datos]   (por defecto /srv/bitabit)
 #
@@ -52,6 +53,30 @@ if [[ "$(psql_postgres "SELECT 1 FROM pg_roles WHERE rolname = '$service_user'")
 fi
 if [[ "$(psql_postgres "SELECT 1 FROM pg_database WHERE datname = '$database'")" != 1 ]]; then
 	runuser -u postgres -- createdb --owner="$service_user" "$database"
+fi
+
+echo "== Configuración en /etc/bitabit/env"
+# Fuera del repositorio. Solo se crea si no existe: así nunca se pisa una
+# clave en uso, que invalidaría los enlaces repartidos. La clave no se muestra.
+install -d -o root -g "$service_user" -m 0750 /etc/bitabit
+if [[ -e /etc/bitabit/env ]]; then
+	echo "ya existe: no se toca"
+else
+	key="$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"
+	(
+		umask 0027
+		# La cadena de conexión va en forma URL, sin espacios, para que el
+		# archivo se pueda cargar igual desde systemd que desde una shell.
+		cat >/etc/bitabit/env <<EOF
+BITABIT_DATABASE_URL=postgres:///$database?host=/var/run/postgresql
+BITABIT_DATA_DIR=$data_dir
+BITABIT_MEDIA_KEYS=k1:$key
+BITABIT_HTTP_ADDR=127.0.0.1:8080
+EOF
+	)
+	chown root:"$service_user" /etc/bitabit/env
+	chmod 0640 /etc/bitabit/env
+	echo "creada, con una clave nueva"
 fi
 
 echo "== Comprobación"
