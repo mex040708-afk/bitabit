@@ -65,6 +65,19 @@ func TestInsertAndFindTrack(t *testing.T) {
 	if !exists[id] || exists[id+1000] {
 		t.Errorf("ExistingTrackIDs = %v", exists)
 	}
+
+	f, found, err := FileByTrack(ctx, pool, id, QualityAAC256)
+	if err != nil || !found || f.Ext != "m4a" || f.SHA256 != [32]byte{8} {
+		t.Errorf("FileByTrack(aac256) = %+v, %v, %v", f, found, err)
+	}
+	for _, missing := range []struct {
+		id      int64
+		quality string
+	}{{id + 1000, QualityOriginal}, {id, "hires"}} {
+		if _, found, err := FileByTrack(ctx, pool, missing.id, missing.quality); err != nil || found {
+			t.Errorf("FileByTrack(%d, %s): found=%v, err=%v", missing.id, missing.quality, found, err)
+		}
+	}
 }
 
 // Si falla una versión, no queda ni la pista.
