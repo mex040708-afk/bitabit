@@ -25,10 +25,6 @@ func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	}
 	cfg.MaxConns = maxConns
 	cfg.ConnConfig.ConnectTimeout = connectTimeout
-	return connect(ctx, cfg)
-}
-
-func connect(ctx context.Context, cfg *pgxpool.Config) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("crear el pool de PostgreSQL: %w", err)
