@@ -110,6 +110,31 @@ func ExistingTrackIDs(ctx context.Context, q Querier, ids []int64) (map[int64]bo
 	return exists, nil
 }
 
+// StoredFile es lo que el endpoint /media necesita de una versión guardada.
+type StoredFile struct {
+	Ext    string
+	SHA256 [32]byte
+}
+
+// FileByTrack busca la versión quality de una pista. found es false si la pista
+// no existe o no tiene esa versión (las de con pérdida no tienen aac256).
+func FileByTrack(ctx context.Context, q Querier, trackID int64, quality string) (f StoredFile, found bool, err error) {
+	var sum []byte
+	err = q.QueryRow(ctx, "SELECT ext, sha256 FROM track_files WHERE track_id = $1 AND quality = $2",
+		trackID, quality).Scan(&f.Ext, &sum)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return StoredFile{}, false, nil
+	}
+	if err != nil {
+		return StoredFile{}, false, fmt.Errorf("buscar la versión %s de la pista %d: %w", quality, trackID, err)
+	}
+	if len(sum) != len(f.SHA256) {
+		return StoredFile{}, false, fmt.Errorf("la versión %s de la pista %d tiene un SHA-256 de %d bytes", quality, trackID, len(sum))
+	}
+	copy(f.SHA256[:], sum)
+	return f, true, nil
+}
+
 // nullIfZero guarda NULL donde el 0 significa «no consta».
 func nullIfZero(n int) any {
 	if n == 0 {
