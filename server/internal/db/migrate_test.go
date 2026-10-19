@@ -3,9 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -14,46 +12,23 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/mex040708-afk/bitabit/server/internal/db/dbtest"
 )
 
-// testPool devuelve un pool que trabaja en un esquema temporal propio del test,
-// que se borra al terminar. Necesita BITABIT_TEST_DATABASE_URL; en el servidor
-// de pruebas vale "host=/var/run/postgresql dbname=bitabit".
+// testPool da un esquema temporal vacío, sin migrar.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("BITABIT_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("hace falta BITABIT_TEST_DATABASE_URL con un PostgreSQL de pruebas")
-	}
-	ctx := context.Background()
+	return dbtest.Pool(t)
+}
 
-	admin, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
+// migratedPool da un esquema temporal con todas las migraciones aplicadas.
+func migratedPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := dbtest.Pool(t)
+	if err := Migrate(context.Background(), pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
 	}
-	schema := "test_" + strings.ToLower(rand.Text())
-	ident := pgx.Identifier{schema}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+ident); err != nil {
-		admin.Close()
-		t.Fatalf("crear el esquema %s: %v", schema, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "DROP SCHEMA "+ident+" CASCADE"); err != nil {
-			t.Errorf("borrar el esquema %s: %v", schema, err)
-		}
-		admin.Close()
-	})
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := connect(ctx, cfg)
-	if err != nil {
-		t.Fatalf("conectar al esquema %s: %v", schema, err)
-	}
-	t.Cleanup(pool.Close) // se ejecuta antes que el DROP: las limpiezas van al revés
 	return pool
 }
 
