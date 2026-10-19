@@ -1,0 +1,50 @@
+# Bóveda de Obsidian e instrucciones de Claude: se quedan en local.
+# En GitHub solo va el código.
+boveda/
+CLAUDE.md
+
+# Secretos
+.env
+*.env
+*.pem
+*.key
+
+# Música: nunca entra en Git (Mandamientos de Git, 8)
+*.flac
+*.m4a
+*.mp3
+*.wav
+*.aiff
+*.ogg
+*.opus
+*.alac
+
+# Go
+server/bin/
+*.test
+*.out
+
+# Java, Gradle y Android
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Escritorio
+desktop/dist/
+desktop/mpv/
+
+# Xcode
+ios/**/xcuserdata/
+ios/**/DerivedData/
+*.xcuserstate
+
+# Sistema
+.DS_Store
+Thumbs.db
