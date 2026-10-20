@@ -1,0 +1,1026 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Bitabit",
+    "version": "1.0.0",
+    "summary": "API propia de Bitabit: sesión, catálogo, búsqueda y enlaces para escuchar.",
+    "description": "Contrato de la API que usan las apps de Android y de escritorio. El servidor y los clientes lo obedecen; cualquier cambio empieza aquí.\n\n**Convenciones**\n\n- JSON en UTF-8, con nombres en camelCase. Fechas RFC 3339 en UTC, duraciones en milisegundos e IDs enteros de 64 bits.\n- Los campos de las respuestas van siempre. Si un dato no consta es `null`, salvo las etiquetas de texto (artista, álbum), que van como cadena vacía.\n- Los clientes ignoran los campos que no conocen: las versiones compatibles pueden añadir campos, parámetros opcionales y endpoints. Lo incompatible irá en `/api/v2`.\n- El servidor rechaza con 400 los cuerpos con campos desconocidos o de más de 4 KiB. Un método no previsto en una ruta responde 405.\n- Los errores de `/api` son un objeto `Error`. Los de `/media` son texto, porque los pide el reproductor.\n- Todo pide `Authorization: Bearer {token}`, salvo `GET /api/v1/info`, `POST /api/v1/sessions` y `/media`, que lleva su propia firma.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "El servidor de Bitabit que use el cliente: la red de casa, internet o, en el emulador, http://10.0.2.2:8080."
+    }
+  ],
+  "security": [
+    {
+      "token": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "servidor",
+      "description": "Datos del servidor, sin sesión."
+    },
+    {
+      "name": "sesiones",
+      "description": "Inicio de sesión con la contraseña de la única cuenta y dispositivos con sesión abierta."
+    },
+    {
+      "name": "catálogo",
+      "description": "Artistas, álbumes, pistas, carátulas y búsqueda. Las respuestas llevan un ETag que cambia con cada importación."
+    },
+    {
+      "name": "audio",
+      "description": "Enlaces firmados y envío del audio."
+    }
+  ],
+  "paths": {
+    "/api/v1/info": {
+      "get": {
+        "tags": ["servidor"],
+        "operationId": "getInfo",
+        "summary": "Datos del servidor",
+        "description": "Sirve para comprobar que la dirección es un servidor de Bitabit y que el cliente entiende su API: tiene que coincidir el primer número de `apiVersion`.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Datos del servidor.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Info" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions": {
+      "post": {
+        "tags": ["sesiones"],
+        "operationId": "login",
+        "summary": "Iniciar sesión",
+        "description": "Abre una sesión para este dispositivo con la contraseña de la cuenta. El token se guarda en el dispositivo y no se vuelve a mostrar.\n\nCada contraseña equivocada cuenta para la IP de la petición. Los nueve primeros fallos seguidos responden 401; el décimo ya responde 429 y bloquea esa IP 24 horas. Acertar pone el contador a cero.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Sesión abierta.",
+            "headers": {
+              "Cache-Control": { "$ref": "#/components/headers/NoStore" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Login" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": {
+            "description": "Contraseña equivocada, o todavía no hay contraseña en el servidor. Dice cuántos intentos quedan antes del bloqueo.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WrongPasswordError" }
+              }
+            }
+          },
+          "429": {
+            "description": "Esta IP está bloqueada por demasiados fallos.",
+            "headers": {
+              "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BlockedError" }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["sesiones"],
+        "operationId": "listSessions",
+        "summary": "Dispositivos con sesión abierta",
+        "description": "Ordenados del usado más recientemente al menos.",
+        "responses": {
+          "200": {
+            "description": "Las sesiones abiertas.",
+            "headers": {
+              "Cache-Control": { "$ref": "#/components/headers/NoStore" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}": {
+      "delete": {
+        "tags": ["sesiones"],
+        "operationId": "closeSession",
+        "summary": "Cerrar una sesión",
+        "description": "Su token deja de valer al momento. Cerrar la sesión propia es cerrar sesión en este dispositivo.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionId" }
+        ],
+        "responses": {
+          "204": { "description": "Sesión cerrada." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/artists": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "listArtists",
+        "summary": "Todos los artistas",
+        "description": "Los artistas de álbum de toda la biblioteca, por nombre, sin distinguir mayúsculas ni tildes.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Los artistas.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ArtistList" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/artists/{artistId}": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "getArtist",
+        "summary": "Un artista y sus álbumes",
+        "parameters": [
+          { "$ref": "#/components/parameters/ArtistId" },
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "El artista.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Artist" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/albums": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "listAlbums",
+        "summary": "Todos los álbumes",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "`name`: por título y después por artista, sin distinguir mayúsculas ni tildes. `added`: lo último importado primero.",
+            "schema": {
+              "type": "string",
+              "enum": ["name", "added"],
+              "default": "name"
+            }
+          },
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Los álbumes.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AlbumList" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/albums/{albumId}": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "getAlbum",
+        "summary": "Un álbum y sus pistas",
+        "parameters": [
+          { "$ref": "#/components/parameters/AlbumId" },
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "El álbum.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Album" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/albums/{albumId}/cover": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "getAlbumCover",
+        "summary": "Carátula de un álbum",
+        "description": "La imagen incrustada en la primera pista del álbum que tenga una, tal cual, sin redimensionar.",
+        "parameters": [
+          { "$ref": "#/components/parameters/AlbumId" },
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "La carátula.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": { "type": "string", "contentMediaType": "image/jpeg" }
+              },
+              "image/png": {
+                "schema": { "type": "string", "contentMediaType": "image/png" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": {
+            "description": "El álbum no existe o no tiene carátula (`hasCover` es falso).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tracks/{trackId}": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "getTrack",
+        "summary": "Una pista",
+        "parameters": [
+          { "$ref": "#/components/parameters/TrackId" },
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "La pista.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Track" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/tracks/{trackId}/link": {
+      "get": {
+        "tags": ["audio"],
+        "operationId": "getTrackLink",
+        "summary": "Enlace firmado para escuchar una pista",
+        "description": "Cada petición firma un enlace nuevo, que caduca a las 12 horas. Ante un 403 de `/media`, el cliente pide otro.",
+        "parameters": [
+          { "$ref": "#/components/parameters/TrackId" },
+          {
+            "name": "quality",
+            "in": "query",
+            "required": true,
+            "description": "La versión que se quiere. Una pista con pérdida solo tiene `orig`.",
+            "schema": { "$ref": "#/components/schemas/Quality" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "El enlace.",
+            "headers": {
+              "Cache-Control": { "$ref": "#/components/headers/NoStore" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Link" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": {
+            "description": "La pista no existe o no tiene esa versión.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "tags": ["catálogo"],
+        "operationId": "search",
+        "summary": "Buscar",
+        "description": "Busca en nombres de artistas, títulos de álbumes y títulos de pistas. Tolera erratas y tildes («beatels» encuentra «Beatles»). Cada lista va de más a menos parecida.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Lo que se busca. Se quitan los espacios de los extremos; tiene que quedar de 1 a 100 caracteres.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 100 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Cuántos resultados como mucho de cada tipo.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+          },
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lo encontrado.",
+            "headers": {
+              "ETag": { "$ref": "#/components/headers/ETag" },
+              "Cache-Control": { "$ref": "#/components/headers/Revalidate" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SearchResult" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/media/{trackId}.{ext}": {
+      "parameters": [
+        {
+          "name": "trackId",
+          "in": "path",
+          "required": true,
+          "description": "ID de la pista, sin ceros a la izquierda.",
+          "schema": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" }
+        },
+        {
+          "name": "ext",
+          "in": "path",
+          "required": true,
+          "description": "Extensión real del archivo. Con `q=aac256` siempre es `m4a`.",
+          "schema": { "type": "string", "pattern": "^[a-z0-9]{1,8}$" }
+        },
+        {
+          "name": "q",
+          "in": "query",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Quality" }
+        },
+        {
+          "name": "exp",
+          "in": "query",
+          "required": true,
+          "description": "Caducidad en segundos Unix.",
+          "schema": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" }
+        },
+        {
+          "name": "kid",
+          "in": "query",
+          "required": true,
+          "description": "Identificador de la clave que firmó.",
+          "schema": { "type": "string", "pattern": "^[a-z0-9]{1,16}$" }
+        },
+        {
+          "name": "sig",
+          "in": "query",
+          "required": true,
+          "description": "HMAC-SHA256 en base64url sin relleno.",
+          "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
+        }
+      ],
+      "get": {
+        "tags": ["audio"],
+        "operationId": "getMedia",
+        "summary": "El audio de una pista",
+        "description": "El archivo tal cual, sin convertir. Los enlaces solo los firma el servidor: el cliente los recibe hechos de `getTrackLink` y no los construye. La consulta lleva exactamente `q`, `exp`, `kid` y `sig`, una vez cada uno.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "description": "Una parte del archivo, para saltar dentro de la pista.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Media" },
+          "206": { "$ref": "#/components/responses/MediaPart" },
+          "304": { "$ref": "#/components/responses/MediaNotModified" },
+          "400": { "$ref": "#/components/responses/MediaBadRequest" },
+          "403": { "$ref": "#/components/responses/MediaForbidden" },
+          "404": { "$ref": "#/components/responses/MediaNotFound" }
+        }
+      },
+      "head": {
+        "tags": ["audio"],
+        "operationId": "headMedia",
+        "summary": "Las cabeceras del audio de una pista",
+        "description": "Igual que `getMedia`, sin el cuerpo.",
+        "security": [],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Media" },
+          "400": { "$ref": "#/components/responses/MediaBadRequest" },
+          "403": { "$ref": "#/components/responses/MediaForbidden" },
+          "404": { "$ref": "#/components/responses/MediaNotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "token": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "El token de `login`: 43 caracteres en base64url. Deja de valer al cerrar su sesión, al cambiar la contraseña o tras 180 días sin usarse."
+      }
+    },
+    "parameters": {
+      "IfNoneMatch": {
+        "name": "If-None-Match",
+        "in": "header",
+        "required": false,
+        "description": "El ETag de una respuesta anterior. Si la biblioteca no ha cambiado, la respuesta es 304 sin cuerpo.",
+        "schema": { "type": "string" }
+      },
+      "SessionId": {
+        "name": "sessionId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Id" }
+      },
+      "ArtistId": {
+        "name": "artistId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Id" }
+      },
+      "AlbumId": {
+        "name": "albumId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Id" }
+      },
+      "TrackId": {
+        "name": "trackId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Id" }
+      }
+    },
+    "headers": {
+      "ETag": {
+        "description": "Cambia cuando cambia la biblioteca.",
+        "schema": { "type": "string" }
+      },
+      "Revalidate": {
+        "description": "`private, no-cache`: el cliente puede guardar la respuesta, pero la vuelve a validar con `If-None-Match` antes de usarla.",
+        "schema": { "type": "string", "const": "private, no-cache" }
+      },
+      "NoStore": {
+        "description": "`no-store`: la respuesta no se guarda en ninguna caché.",
+        "schema": { "type": "string", "const": "no-store" }
+      },
+      "RetryAfter": {
+        "description": "Segundos que faltan para que se acabe el bloqueo.",
+        "schema": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "responses": {
+      "NotModified": {
+        "description": "La biblioteca no ha cambiado desde el ETag de `If-None-Match`. Sin cuerpo.",
+        "headers": {
+          "ETag": { "$ref": "#/components/headers/ETag" }
+        }
+      },
+      "BadRequest": {
+        "description": "Algún parámetro o el cuerpo no tienen el formato del contrato.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Falta el token o ya no vale. El cliente vuelve a pedir la contraseña.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No existe.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "Media": {
+        "description": "El archivo entero.",
+        "headers": {
+          "ETag": {
+            "description": "`\"{sha256}\"`, el SHA-256 del archivo en hexadecimal.",
+            "schema": { "type": "string", "pattern": "^\"[0-9a-f]{64}\"$" }
+          },
+          "Cache-Control": {
+            "description": "Solo en el dispositivo, durante las 12 horas que dura el enlace.",
+            "schema": { "type": "string", "const": "private, max-age=43200, immutable" }
+          },
+          "Accept-Ranges": {
+            "schema": { "type": "string", "const": "bytes" }
+          }
+        },
+        "content": {
+          "audio/flac": {
+            "schema": { "type": "string", "contentMediaType": "audio/flac" }
+          },
+          "audio/mp4": {
+            "schema": { "type": "string", "contentMediaType": "audio/mp4" }
+          },
+          "audio/mpeg": {
+            "schema": { "type": "string", "contentMediaType": "audio/mpeg" }
+          },
+          "audio/ogg": {
+            "schema": { "type": "string", "contentMediaType": "audio/ogg" }
+          },
+          "application/octet-stream": {
+            "schema": { "type": "string", "contentMediaType": "application/octet-stream" }
+          }
+        }
+      },
+      "MediaPart": {
+        "description": "La parte pedida con `Range`.",
+        "headers": {
+          "Content-Range": {
+            "schema": { "type": "string" }
+          }
+        },
+        "content": {
+          "audio/flac": {
+            "schema": { "type": "string", "contentMediaType": "audio/flac" }
+          },
+          "audio/mp4": {
+            "schema": { "type": "string", "contentMediaType": "audio/mp4" }
+          },
+          "audio/mpeg": {
+            "schema": { "type": "string", "contentMediaType": "audio/mpeg" }
+          },
+          "audio/ogg": {
+            "schema": { "type": "string", "contentMediaType": "audio/ogg" }
+          },
+          "application/octet-stream": {
+            "schema": { "type": "string", "contentMediaType": "application/octet-stream" }
+          }
+        }
+      },
+      "MediaNotModified": {
+        "description": "El archivo es el del ETag de `If-None-Match`. Sin cuerpo."
+      },
+      "MediaBadRequest": {
+        "description": "El enlace está mal formado: sobra o falta algo en la consulta, o un campo no tiene el formato.",
+        "content": {
+          "text/plain": {
+            "schema": { "type": "string" }
+          }
+        }
+      },
+      "MediaForbidden": {
+        "description": "La firma o la clave no valen, o el enlace ha caducado. El cliente pide otro a `getTrackLink`.",
+        "content": {
+          "text/plain": {
+            "schema": { "type": "string" }
+          }
+        }
+      },
+      "MediaNotFound": {
+        "description": "La pista no existe, no tiene esa versión o su extensión no es la del enlace.",
+        "content": {
+          "text/plain": {
+            "schema": { "type": "string" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Id": {
+        "type": "integer",
+        "format": "int64",
+        "minimum": 1
+      },
+      "Quality": {
+        "description": "`orig`: el original, tal cual. `aac256`: AAC a 256 kbit/s, para ahorrar datos.",
+        "type": "string",
+        "enum": ["orig", "aac256"]
+      },
+      "Info": {
+        "type": "object",
+        "required": ["service", "apiVersion", "serverVersion"],
+        "properties": {
+          "service": { "type": "string", "const": "bitabit" },
+          "apiVersion": {
+            "description": "La versión de este contrato que sirve el servidor.",
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "examples": ["1.0.0"]
+          },
+          "serverVersion": {
+            "description": "La versión del servidor, para depurar.",
+            "type": "string",
+            "examples": ["0.2.0"]
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["password", "device"],
+        "properties": {
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "writeOnly": true
+          },
+          "device": {
+            "description": "Nombre para reconocer el dispositivo en la lista de sesiones. Se quitan los espacios de los extremos.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "examples": ["Pixel 7a"]
+          }
+        }
+      },
+      "Login": {
+        "type": "object",
+        "required": ["token", "session"],
+        "properties": {
+          "token": {
+            "description": "Se manda en `Authorization: Bearer {token}`. El servidor solo guarda su SHA-256: si se pierde, se inicia sesión otra vez.",
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "session": { "$ref": "#/components/schemas/Session" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": ["id", "device", "createdAt", "lastUsedAt", "current"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "device": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "lastUsedAt": {
+            "description": "Aproximado: se actualiza como mucho una vez por hora.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "current": {
+            "description": "Si es la sesión del token de esta petición.",
+            "type": "boolean"
+          }
+        }
+      },
+      "SessionList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Session" }
+          }
+        }
+      },
+      "ArtistRef": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "name": {
+            "description": "Vacío si las pistas no dicen el artista.",
+            "type": "string"
+          }
+        }
+      },
+      "AlbumRef": {
+        "type": "object",
+        "required": ["id", "title"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "title": {
+            "description": "Vacío si las pistas no dicen el álbum.",
+            "type": "string"
+          }
+        }
+      },
+      "ArtistSummary": {
+        "description": "Un artista de álbum: la etiqueta `album_artist` o, si falta, `artist`.",
+        "type": "object",
+        "required": ["id", "name", "albumCount"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "name": { "type": "string" },
+          "albumCount": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "ArtistList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ArtistSummary" }
+          }
+        }
+      },
+      "Artist": {
+        "type": "object",
+        "required": ["id", "name", "albums"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "name": { "type": "string" },
+          "albums": {
+            "description": "Por año (los que no lo tienen, al final) y después por título.",
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/components/schemas/AlbumSummary" }
+          }
+        }
+      },
+      "AlbumSummary": {
+        "description": "Un álbum es el par (artista de álbum, título). Las pistas sin etiqueta de álbum forman uno de título vacío por artista.",
+        "type": "object",
+        "required": ["id", "title", "artist", "year", "trackCount", "durationMs", "addedAt", "hasCover"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "title": {
+            "description": "Vacío si las pistas no dicen el álbum.",
+            "type": "string"
+          },
+          "artist": { "$ref": "#/components/schemas/ArtistRef" },
+          "year": {
+            "description": "El año más antiguo de las fechas de publicación de sus pistas.",
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 9999
+          },
+          "trackCount": { "type": "integer", "minimum": 1 },
+          "durationMs": { "type": "integer", "format": "int64", "minimum": 1 },
+          "addedAt": {
+            "description": "Cuándo se importó su última pista.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "hasCover": {
+            "description": "Si `getAlbumCover` tiene una imagen.",
+            "type": "boolean"
+          }
+        }
+      },
+      "AlbumList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AlbumSummary" }
+          }
+        }
+      },
+      "Album": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AlbumSummary" },
+          {
+            "type": "object",
+            "required": ["tracks"],
+            "properties": {
+              "tracks": {
+                "description": "Por disco y número de pista (las que no lo tienen, al final) y después por título.",
+                "type": "array",
+                "minItems": 1,
+                "items": { "$ref": "#/components/schemas/Track" }
+              }
+            }
+          }
+        ]
+      },
+      "Track": {
+        "type": "object",
+        "required": ["id", "title", "artist", "album", "albumArtist", "discNumber", "trackNumber", "durationMs", "files"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "title": {
+            "description": "Nunca vacío: si el archivo no lo trae, es el nombre con el que llegó.",
+            "type": "string",
+            "minLength": 1
+          },
+          "artist": {
+            "description": "El artista de esta pista tal como viene en la etiqueta, por ejemplo «A feat. B». Vacío si no consta.",
+            "type": "string"
+          },
+          "album": { "$ref": "#/components/schemas/AlbumRef" },
+          "albumArtist": { "$ref": "#/components/schemas/ArtistRef" },
+          "discNumber": { "type": ["integer", "null"], "minimum": 1, "maximum": 9999 },
+          "trackNumber": { "type": ["integer", "null"], "minimum": 1, "maximum": 9999 },
+          "durationMs": { "type": "integer", "minimum": 1 },
+          "files": {
+            "description": "Las versiones que se pueden pedir, primero `orig`.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "items": { "$ref": "#/components/schemas/TrackFile" }
+          }
+        }
+      },
+      "TrackFile": {
+        "description": "Una versión de una pista. Sirve para elegir la calidad y para enseñar el formato.",
+        "type": "object",
+        "required": ["quality", "codec", "lossless", "bits", "sampleRate", "channels", "bytes"],
+        "properties": {
+          "quality": { "$ref": "#/components/schemas/Quality" },
+          "codec": {
+            "description": "El códec según FFmpeg: `flac`, `aac`, `mp3`, `vorbis`, `opus`…",
+            "type": "string",
+            "examples": ["flac"]
+          },
+          "lossless": { "type": "boolean" },
+          "bits": {
+            "description": "Bits por muestra. `null` si tiene pérdida.",
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 32
+          },
+          "sampleRate": { "type": "integer", "minimum": 1, "examples": [96000] },
+          "channels": { "type": "integer", "minimum": 1 },
+          "bytes": { "type": "integer", "format": "int64", "minimum": 1 }
+        }
+      },
+      "Link": {
+        "type": "object",
+        "required": ["path", "quality", "expiresAt"],
+        "properties": {
+          "path": {
+            "description": "Relativo al servidor: el cliente le pone delante la dirección con la que llega a él. No se escribe en ningún registro.",
+            "type": "string",
+            "pattern": "^/media/[1-9][0-9]{0,18}\\.[a-z0-9]{1,8}\\?",
+            "examples": ["/media/4312.flac?q=orig&exp=1767225600&kid=k1&sig=lPcWGxpWTo9I7h0clRUkvaAFXkBwXt3Ea3zFFF_rexY"]
+          },
+          "quality": { "$ref": "#/components/schemas/Quality" },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": ["artists", "albums", "tracks"],
+        "properties": {
+          "artists": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ArtistSummary" }
+          },
+          "albums": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AlbumSummary" }
+          },
+          "tracks": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Track" }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error", "message"],
+        "properties": {
+          "error": {
+            "description": "Qué ha pasado. Los clientes deciden qué enseñar según este código.",
+            "type": "string",
+            "enum": ["bad_request", "unauthorized", "wrong_password", "blocked", "not_found", "internal"]
+          },
+          "message": {
+            "description": "Texto corto para depurar, sin detalles internos.",
+            "type": "string"
+          }
+        }
+      },
+      "WrongPasswordError": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Error" },
+          {
+            "type": "object",
+            "required": ["attemptsLeft"],
+            "properties": {
+              "error": { "const": "wrong_password" },
+              "attemptsLeft": {
+                "description": "Fallos que quedan antes de que se bloquee esta IP.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9
+              }
+            }
+          }
+        ]
+      },
+      "BlockedError": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Error" },
+          {
+            "type": "object",
+            "required": ["retryAfter"],
+            "properties": {
+              "error": { "const": "blocked" },
+              "retryAfter": {
+                "description": "Segundos que faltan para que se acabe el bloqueo, igual que la cabecera `Retry-After`.",
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
