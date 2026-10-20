@@ -14,6 +14,10 @@ go vet ./...
 go test ./...
 ```
 
+## API
+
+El contrato de la API propia está en [`api/openapi.json`](api/README.md), en OpenAPI 3.1.
+
 ## Clientes
 
 - [Android](android/README.md)
