@@ -35,6 +35,8 @@ captures/
 *.aab
 *.jks
 *.keystore
+# Binario (mandamiento 22): se genera en local con «gradle wrapper». Ver android/README.md.
+gradle-wrapper.jar
 
 # Escritorio
 desktop/dist/
