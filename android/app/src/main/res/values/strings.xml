@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Bitabit</string>
+    <string name="server_label">Servidor</string>
+    <!-- En el emulador, 10.0.2.2 es el localhost de Windows. -->
+    <string name="server_default" translatable="false">http://10.0.2.2:8080</string>
+    <string name="link_label">Enlace (lo que imprime «bitabit link»)</string>
+    <string name="link_hint" translatable="false">/media/1.flac?q=orig&amp;exp=…&amp;kid=…&amp;sig=…</string>
+    <string name="play">Reproducir</string>
+    <string name="stop">Parar</string>
+    <string name="idle">Pega un enlace y pulsa Reproducir.</string>
+    <string name="bad_link">El servidor tiene que empezar por http:// o https:// y el enlace tiene que contener /media/.</string>
+    <string name="playing">Reproduciendo %1$s…</string>
+    <string name="stopped">Parado.</string>
+    <string name="track_format">Pista: %1$s, %2$s bits, %3$d Hz, %4$d canales.</string>
+    <string name="error">No se pudo reproducir: %1$s</string>
+    <string name="result">MD5 de lo que ha sonado:\n%1$s\n\n%2$d muestras, entregadas al sistema de sonido en %3$s.\nCompáralo con el MD5 del original en el servidor.</string>
+    <string name="interrupted">Hubo un salto: el MD5 solo cuenta desde el último y no vale para comparar.</string>
+</resources>
