@@ -1,0 +1,11 @@
+[versions]
+javafx = "21.0.12"
+gson = "2.14.0"
+junit = "4.13.2"
+
+[libraries]
+javafx-base = { group = "org.openjfx", name = "javafx-base", version.ref = "javafx" }
+javafx-graphics = { group = "org.openjfx", name = "javafx-graphics", version.ref = "javafx" }
+javafx-controls = { group = "org.openjfx", name = "javafx-controls", version.ref = "javafx" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
