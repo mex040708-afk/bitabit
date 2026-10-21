@@ -3,6 +3,7 @@
 //
 //	bitabit [serve]                     arranca el servidor
 //	bitabit link <pista> [orig|aac256]  imprime un enlace firmado (fase 1)
+//	bitabit password                    cambia la contraseña; se lee de la entrada estándar
 //
 // Configuración por variables de entorno:
 //
@@ -40,7 +41,7 @@ const (
 	defaultHTTPAddr = "127.0.0.1:8080"
 	shutdownTimeout = 10 * time.Second
 	linkTimeout     = 10 * time.Second
-	usage           = "uso: bitabit [serve] | bitabit link <pista> [orig|aac256]"
+	usage           = "uso: bitabit [serve] | bitabit link <pista> [orig|aac256] | bitabit password"
 )
 
 func main() {
@@ -53,6 +54,9 @@ func main() {
 	case os.Args[1] == "link":
 		failure = "no se pudo crear el enlace"
 		err = printLink(os.Args[2:])
+	case os.Args[1] == "password":
+		failure = "no se pudo cambiar la contraseña"
+		err = changePassword(os.Args[2:], os.Stdin, os.Stdout)
 	default:
 		failure = "orden desconocida"
 		err = errors.New(usage)
