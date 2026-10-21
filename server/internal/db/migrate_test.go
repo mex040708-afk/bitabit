@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +43,20 @@ func appliedVersions(t *testing.T, pool *pgxpool.Pool) []int {
 	versions, err := pgx.CollectRows(rows, pgx.RowTo[int])
 	if err != nil {
 		t.Fatal(err)
+	}
+	return versions
+}
+
+// allVersions son las versiones de todas las migraciones del repositorio.
+func allVersions(t *testing.T) []int {
+	t.Helper()
+	ms, err := loadMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make([]int, len(ms))
+	for i, m := range ms {
+		versions[i] = m.version
 	}
 	return versions
 }
@@ -98,13 +114,13 @@ func TestMigrateCreatesTables(t *testing.T) {
 	if err := Migrate(context.Background(), pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	for _, table := range []string{"tracks", "track_files", "schema_migrations"} {
+	for _, table := range []string{"tracks", "track_files", "artists", "albums", "library", "schema_migrations"} {
 		if !tableExists(t, pool, table) {
 			t.Errorf("falta la tabla %s", table)
 		}
 	}
-	if got := appliedVersions(t, pool); len(got) != 1 || got[0] != 1 {
-		t.Errorf("versiones aplicadas: %v, want [1]", got)
+	if got, want := appliedVersions(t, pool), allVersions(t); !slices.Equal(got, want) {
+		t.Errorf("versiones aplicadas: %v, want %v", got, want)
 	}
 }
 
@@ -127,8 +143,8 @@ func TestMigrateTwiceAndConcurrently(t *testing.T) {
 	if err := Migrate(ctx, pool); err != nil {
 		t.Errorf("Migrate otra vez: %v", err)
 	}
-	if got := appliedVersions(t, pool); len(got) != 1 {
-		t.Errorf("versiones aplicadas: %v, want [1]", got)
+	if got, want := appliedVersions(t, pool), allVersions(t); !slices.Equal(got, want) {
+		t.Errorf("versiones aplicadas: %v, want %v", got, want)
 	}
 }
 
@@ -152,10 +168,11 @@ func TestMigrateRejectsNewerDatabase(t *testing.T) {
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "INSERT INTO schema_migrations (version, name, checksum) VALUES (2, 'futura', 'x')"); err != nil {
+	last := len(allVersions(t))
+	if _, err := pool.Exec(ctx, "INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, 'futura', 'x')", last+1); err != nil {
 		t.Fatal(err)
 	}
-	if err := Migrate(ctx, pool); err == nil || !strings.Contains(err.Error(), "solo conoce hasta la 1") {
+	if err := Migrate(ctx, pool); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("solo conoce hasta la %d", last)) {
 		t.Errorf("error %v, want que la base es más nueva que el programa", err)
 	}
 }
@@ -185,10 +202,15 @@ func TestSchemaConstraints(t *testing.T) {
 	}
 
 	sha := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+	// Desde la 0002, toda pista va en un álbum.
+	if _, err := pool.Exec(ctx, `WITH ar AS (INSERT INTO artists (name) VALUES ('Artista') RETURNING id)
+		INSERT INTO albums (artist_id, title) SELECT id, 'Disco' FROM ar`); err != nil {
+		t.Fatal(err)
+	}
 	insertTrack := func(title string, source []byte) (int64, error) {
 		var id int64
-		err := pool.QueryRow(ctx, `INSERT INTO tracks (title, duration_ms, source_sha256)
-			VALUES ($1, 1000, $2) RETURNING id`, title, source).Scan(&id)
+		err := pool.QueryRow(ctx, `INSERT INTO tracks (album_id, title, duration_ms, source_sha256)
+			VALUES ((SELECT min(id) FROM albums), $1, 1000, $2) RETURNING id`, title, source).Scan(&id)
 		return id, err
 	}
 	const insertFile = `INSERT INTO track_files
@@ -215,9 +237,10 @@ func TestSchemaConstraints(t *testing.T) {
 	}
 
 	const (
-		unique = "23505"
-		check  = "23514"
-		fk     = "23503"
+		unique  = "23505"
+		check   = "23514"
+		fk      = "23503"
+		notNull = "23502"
 	)
 	tests := []struct {
 		desc string
@@ -225,15 +248,15 @@ func TestSchemaConstraints(t *testing.T) {
 		args []any
 		code string
 	}{
-		{"fuente repetida", `INSERT INTO tracks (title, duration_ms, source_sha256) VALUES ('X', 1, $1)`,
+		{"fuente repetida", `INSERT INTO tracks (album_id, title, duration_ms, source_sha256) VALUES ((SELECT min(id) FROM albums), 'X', 1, $1)`,
 			[]any{sha('a')}, unique},
-		{"título vacío", `INSERT INTO tracks (title, duration_ms, source_sha256) VALUES ('', 1, $1)`,
+		{"título vacío", `INSERT INTO tracks (album_id, title, duration_ms, source_sha256) VALUES ((SELECT min(id) FROM albums), '', 1, $1)`,
 			[]any{sha('f')}, check},
-		{"número de pista 0", `INSERT INTO tracks (title, duration_ms, source_sha256, track_number) VALUES ('X', 1, $1, 0)`,
+		{"número de pista 0", `INSERT INTO tracks (album_id, title, duration_ms, source_sha256, track_number) VALUES ((SELECT min(id) FROM albums), 'X', 1, $1, 0)`,
 			[]any{sha('f')}, check},
-		{"duración 0", `INSERT INTO tracks (title, duration_ms, source_sha256) VALUES ('X', 0, $1)`,
+		{"duración 0", `INSERT INTO tracks (album_id, title, duration_ms, source_sha256) VALUES ((SELECT min(id) FROM albums), 'X', 0, $1)`,
 			[]any{sha('f')}, check},
-		{"SHA-256 corto", `INSERT INTO tracks (title, duration_ms, source_sha256) VALUES ('X', 1, $1)`,
+		{"SHA-256 corto", `INSERT INTO tracks (album_id, title, duration_ms, source_sha256) VALUES ((SELECT min(id) FROM albums), 'X', 1, $1)`,
 			[]any{sha('f')[:31]}, check},
 		{"calidad desconocida", insertFile, []any{lossyID, "hires", "flac", "flac", true, 24, sha('g'), nil}, check},
 		{"extensión en mayúsculas", insertFile, []any{lossyID, "aac256", "M4A", "aac", false, nil, sha('g'), nil}, check},
@@ -245,6 +268,16 @@ func TestSchemaConstraints(t *testing.T) {
 		{"MD5 corto", insertFile, []any{id, "orig", "flac", "flac", true, 16, sha('g'), md5[:15]}, check},
 		{"versión repetida", insertFile, []any{id, "orig", "flac", "flac", true, 16, sha('g'), nil}, unique},
 		{"pista que no existe", insertFile, []any{int64(999999), "orig", "flac", "flac", true, 16, sha('g'), nil}, fk},
+		{"pista sin álbum", `INSERT INTO tracks (title, duration_ms, source_sha256) VALUES ('X', 1, $1)`,
+			[]any{sha('f')}, notNull},
+		{"álbum que no existe", `INSERT INTO tracks (album_id, title, duration_ms, source_sha256) VALUES (999999, 'X', 1, $1)`,
+			[]any{sha('f')}, fk},
+		{"artista repetido", `INSERT INTO artists (name) VALUES ('Artista')`, nil, unique},
+		{"álbum repetido", `INSERT INTO albums (artist_id, title) SELECT artist_id, title FROM albums`, nil, unique},
+		{"artista de álbum que no existe", `INSERT INTO albums (artist_id, title) VALUES (999999, 'X')`, nil, fk},
+		{"carátula en gif", `UPDATE albums SET cover_ext = 'gif'`, nil, check},
+		{"segunda fila de library", `INSERT INTO library (id) VALUES (2)`, nil, check},
+		{"versión 0", `UPDATE library SET version = 0`, nil, check},
 	}
 	for _, tt := range tests {
 		t.Run(tt.desc, func(t *testing.T) {
