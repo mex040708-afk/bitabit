@@ -80,15 +80,17 @@ func TestInsertAndFindTrack(t *testing.T) {
 	}
 }
 
-// Si falla una versión, no queda ni la pista.
+// Si falla una versión, no queda ni la pista, ni su álbum, ni sube la versión
+// de la biblioteca.
 func TestInsertTrackIsAtomic(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
+	before := libraryVersion(t, pool)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = InsertTrack(ctx, tx, NewTrack{Title: "Tono", Duration: time.Second, SourceSHA256: [32]byte{1}},
+	_, err = InsertTrack(ctx, tx, NewTrack{Title: "Tono", Artist: "Grupo", Album: "Disco", Duration: time.Second, SourceSHA256: [32]byte{1}},
 		[]TrackFile{{Quality: "hires", Ext: "flac", Codec: "flac", Lossless: true, SampleRate: 1, Bits: 16,
 			Channels: 1, Bytes: 1}})
 	if err == nil {
@@ -97,11 +99,12 @@ func TestInsertTrackIsAtomic(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracks").Scan(&n); err != nil {
-		t.Fatal(err)
+	for _, table := range []string{"tracks", "albums", "artists"} {
+		if n := count(t, pool, table); n != 0 {
+			t.Errorf("quedan %d filas en %s", n, table)
+		}
 	}
-	if n != 0 {
-		t.Errorf("quedan %d pistas", n)
+	if v := libraryVersion(t, pool); v != before {
+		t.Errorf("versión de la biblioteca %d, want %d", v, before)
 	}
 }
