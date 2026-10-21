@@ -79,7 +79,7 @@ type Importer struct {
 // NewImporter prepara la importación en dataDir, que debe tener entrada/,
 // biblioteca/ y fallidos/ (las crea setup-server.sh). No las crea él: si faltan,
 // lo más probable es que BITABIT_DATA_DIR apunte a otro sitio. Sí crea
-// biblioteca/orig y biblioteca/aac.
+// biblioteca/orig, biblioteca/aac y biblioteca/covers.
 func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importer, error) {
 	if !filepath.IsAbs(dataDir) {
 		return nil, fmt.Errorf("importación: la carpeta de datos debe ser una ruta absoluta: %q", dataDir)
@@ -100,7 +100,7 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 			return nil, fmt.Errorf("importación: %s no es una carpeta", dir)
 		}
 	}
-	for _, dir := range []string{im.versionDir(db.QualityOriginal), im.versionDir(db.QualityAAC256)} {
+	for _, dir := range []string{im.versionDir(db.QualityOriginal), im.versionDir(db.QualityAAC256), im.coverDir()} {
 		if err := os.MkdirAll(dir, dirPerm); err != nil {
 			return nil, fmt.Errorf("importación: crear %s: %w", dir, err)
 		}
@@ -194,7 +194,12 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
 
-	id, err = im.store(ctx, rel, sum, info, v)
+	cover, err := im.stageCover(ctx, rel, src, work)
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
+	}
+
+	id, err = im.store(ctx, rel, sum, info, v, cover)
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
@@ -208,10 +213,10 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	return Result{Outcome: Imported, TrackID: id}, nil
 }
 
-// store guarda la pista y coloca sus versiones. Las versiones se renombran a su
+// store guarda la pista y coloca sus versiones y su carátula. Se renombran a su
 // sitio dentro de la transacción y antes de confirmarla: si la confirmación
 // falla, se borran.
-func (im *Importer) store(ctx context.Context, rel string, sum [32]byte, info Info, v Versions) (id int64, err error) {
+func (im *Importer) store(ctx context.Context, rel string, sum [32]byte, info Info, v Versions, cover Cover) (id int64, err error) {
 	files, err := trackFiles(info, v)
 	if err != nil {
 		return 0, err
@@ -233,6 +238,9 @@ func (im *Importer) store(ctx context.Context, rel string, sum [32]byte, info In
 	}
 	placed, err := im.place(id, v)
 	if err == nil {
+		placed, err = im.placeCover(ctx, tx, id, cover, placed)
+	}
+	if err == nil {
 		err = tx.Commit(ctx)
 	}
 	if err != nil {
@@ -253,11 +261,17 @@ func (im *Importer) place(id int64, v Versions) ([]string, error) {
 	if v.AAC != "" {
 		moves = append(moves, [2]string{v.AAC, im.versionPath(db.QualityAAC256, id, "m4a")})
 	}
+	return placeAll(moves)
+}
+
+// placeAll mueve cada origen a su destino y devuelve los destinos que llegó a
+// colocar. Un destino que ya existe no se pisa: o la base de datos no es la de
+// esta biblioteca, o un corte dejó una carátula sin dueño (ADR-015). En los dos
+// casos, mejor parar.
+func placeAll(moves [][2]string) ([]string, error) {
 	var placed []string
 	for _, m := range moves {
 		src, dst := m[0], m[1]
-		// Rename pisaría sin avisar. Un archivo con este ID solo puede existir si
-		// la base de datos no es la de esta biblioteca: mejor parar.
 		if _, err := os.Lstat(dst); err == nil {
 			return placed, fmt.Errorf("ya existe %s: ¿la base de datos no corresponde a esta biblioteca?", dst)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -479,6 +493,14 @@ func (im *Importer) Recover(ctx context.Context) ([]string, error) {
 
 func (im *Importer) versionDir(quality string) string {
 	return filepath.Join(im.library, library.Dir(quality))
+}
+
+func (im *Importer) coverDir() string {
+	return filepath.Join(im.library, library.CoverDir)
+}
+
+func (im *Importer) coverPath(albumID int64, ext string) string {
+	return filepath.Join(im.library, filepath.FromSlash(library.CoverFile(albumID, ext)))
 }
 
 func (im *Importer) versionPath(quality string, id int64, ext string) string {
