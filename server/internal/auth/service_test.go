@@ -345,3 +345,32 @@ func TestOpenSessionRefusesChangedPassword(t *testing.T) {
 		t.Errorf("hay %d sesiones tras un inicio de sesión rechazado, want 0", n)
 	}
 }
+
+// CheckPassword comprueba la contraseña sin abrir sesiones y comparte el bloqueo
+// por IP con Login (ADR-031).
+func TestCheckPasswordOpensNoSessionAndSharesTheLockout(t *testing.T) {
+	s, pool, _ := testService(t)
+	ctx := context.Background()
+	if err := s.CheckPassword(ctx, testIP, testPassword); err != nil {
+		t.Fatalf("CheckPassword con la contraseña buena: %v", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM sessions").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("sesiones tras CheckPassword = %d, %v; want 0", n, err)
+	}
+	var wrong *WrongPasswordError
+	if err := s.CheckPassword(ctx, testIP, "otra contraseña"); !errors.As(err, &wrong) {
+		t.Fatalf("CheckPassword con la mala: %v, want WrongPasswordError", err)
+	}
+	// Nueve fallos más: el décimo bloquea la IP también para Login.
+	for i := 0; i < 8; i++ {
+		_ = s.CheckPassword(ctx, testIP, "otra contraseña")
+	}
+	var blocked *BlockedError
+	if err := s.CheckPassword(ctx, testIP, "otra contraseña"); !errors.As(err, &blocked) {
+		t.Fatalf("el décimo fallo debía bloquear: %v", err)
+	}
+	if _, _, err := s.Login(ctx, testIP, testPassword, "Prueba"); !errors.As(err, &blocked) {
+		t.Errorf("Login desde una IP bloqueada por CheckPassword: %v, want BlockedError", err)
+	}
+}

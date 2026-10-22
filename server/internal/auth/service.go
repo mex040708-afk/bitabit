@@ -100,6 +100,33 @@ func (s *Service) Login(ctx context.Context, ip netip.Addr, password, device str
 	return token, sess, nil
 }
 
+// CheckPassword comprueba la contraseña que envía ip sin abrir ninguna sesión: es
+// la forma antigua de autenticarse de la capa OpenSubsonic, que manda la contraseña
+// en cada petición (ADR-031). Cuenta para el bloqueo igual que Login.
+func (s *Service) CheckPassword(ctx context.Context, ip netip.Addr, password string) error {
+	ip = ip.Unmap()
+	now := s.now()
+	if wait, blocked := s.lock.blocked(ip, now); blocked {
+		return &BlockedError{RetryAfter: wait}
+	}
+	stored, hasPassword, err := s.storedHash(ctx)
+	if err != nil {
+		return err
+	}
+	if !hasPassword {
+		return s.failure(ip, now)
+	}
+	ok, err := VerifyPassword(password, stored)
+	if err != nil {
+		return fmt.Errorf("comprobar la contraseña: %w", err)
+	}
+	if !ok {
+		return s.failure(ip, now)
+	}
+	s.lock.succeeded(ip)
+	return nil
+}
+
 // failure anota un fallo de ip y devuelve su error. El fallo que llega al límite
 // ya es el bloqueo: su respuesta es 429, no 401 (ADR-014).
 func (s *Service) failure(ip netip.Addr, now time.Time) error {
