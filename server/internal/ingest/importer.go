@@ -35,6 +35,11 @@ const (
 	workDirPrefix  = ".tmp-"
 	errorNoteExt   = ".error.txt"
 	maxFailedTries = 1000
+
+	// OrphanCoverGrace es lo que tiene que llevar una carátula sin dueño en covers/
+	// para que Recover la borre. Es mucho más de lo que dura cualquier importación
+	// (ADR-015): una más joven puede ser de una importación que aún no ha confirmado.
+	OrphanCoverGrace = 24 * time.Hour
 )
 
 // Outcome es lo que pasó con un archivo de la entrada.
@@ -74,6 +79,7 @@ type Importer struct {
 	failed  string
 	pool    *pgxpool.Pool
 	log     *slog.Logger
+	now     func() time.Time // los tests lo mueven para no esperar 24 horas
 }
 
 // NewImporter prepara la importación en dataDir, que debe tener entrada/,
@@ -90,6 +96,7 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 		failed:  filepath.Join(dataDir, "fallidos"),
 		pool:    pool,
 		log:     log,
+		now:     time.Now,
 	}
 	for _, dir := range []string{im.inbox, im.library, im.failed} {
 		fi, err := os.Stat(dir)
@@ -543,17 +550,55 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 		if ext, ok := exts[c.albumID]; ok && (c.thumb || ext == c.ext) {
 			continue
 		}
-		orphans = append(orphans, filepath.Join(im.coverDir(), c.name))
+		file := filepath.Join(im.coverDir(), c.name)
+		rel := path.Join(library.CoverDir, c.name)
+		removed, err := im.removeOrphanCover(ctx, c.albumID, c.name, c.thumb, c.ext)
+		if err != nil {
+			return nil, err
+		}
+		if removed {
+			im.log.Warn("carátula sin dueño borrada: llevaba más de un día sin álbum que la referencie y se puede regenerar del original",
+				"álbum", c.albumID, "archivo", rel)
+			continue
+		}
+		orphans = append(orphans, file)
 		// Mientras siga ahí, las pistas nuevas del álbum con una carátula del mismo
 		// formato no se importan: placeAll no pisa un destino que ya existe.
-		im.log.Warn("carátula que ningún álbum referencia; no se borra, y hasta que se quite puede bloquear las pistas nuevas del álbum",
-			"álbum", c.albumID, "archivo", path.Join(library.CoverDir, c.name))
+		im.log.Warn("carátula que ningún álbum referencia; se borrará pasado el plazo de gracia, y hasta entonces puede bloquear las pistas nuevas del álbum",
+			"álbum", c.albumID, "archivo", rel)
 	}
 	return orphans, nil
 }
 
 func (im *Importer) versionDir(quality string) string {
 	return filepath.Join(im.library, library.Dir(quality))
+}
+
+// removeOrphanCover borra la carátula name del álbum albumID si lleva más de
+// OrphanCoverGrace sin que nada la referencie. Antes de borrar vuelve a mirar la base
+// de datos: una importación que acaba de confirmarse la habría hecho suya después
+// del primer vistazo. Solo borra archivos con forma de carátula; lo demás de covers/
+// se avisa y se queda. Devuelve si la borró.
+func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name string, thumb bool, ext string) (bool, error) {
+	file := filepath.Join(im.coverDir(), name)
+	info, err := os.Lstat(file)
+	if err != nil {
+		return false, fmt.Errorf("mirar la carátula %s: %w", name, err)
+	}
+	if !info.Mode().IsRegular() || im.now().Sub(info.ModTime()) < OrphanCoverGrace {
+		return false, nil
+	}
+	exts, err := db.AlbumCovers(ctx, im.pool, []int64{albumID})
+	if err != nil {
+		return false, fmt.Errorf("comprobar la carátula %s antes de borrarla: %w", name, err)
+	}
+	if got, ok := exts[albumID]; ok && (thumb || got == ext) {
+		return false, nil
+	}
+	if err := os.Remove(file); err != nil {
+		return false, fmt.Errorf("borrar la carátula %s: %w", name, err)
+	}
+	return true, nil
 }
 
 func (im *Importer) coverDir() string {

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -193,6 +194,18 @@ func TestImportMakesAThumbnailOnlyForBigCovers(t *testing.T) {
 	if orphans, err := e.im.Recover(context.Background()); err != nil || len(orphans) != 0 {
 		t.Errorf("Recover = %v, %v; la miniatura de un álbum con carátula no es huérfana", orphans, err)
 	}
+	// Ni siquiera pasado el plazo de gracia: la miniatura es .jpg aunque la carátula sea .png.
+	thumbFile := e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", bigAlbum))
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	if err := os.Chtimes(thumbFile, longAgo, longAgo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.im.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if !exists(t, thumbFile) {
+		t.Error("Recover borró la miniatura de un álbum con carátula")
+	}
 }
 
 // pngSize lee el ancho y el alto de un PNG.
@@ -206,7 +219,8 @@ func pngSize(t *testing.T, path string) (int, int) {
 }
 
 // Recover avisa de las carátulas que ningún álbum referencia y las devuelve, sin
-// borrarlas. La carátula buena de un álbum no cuenta.
+// borrarlas mientras no pase el plazo de gracia. La carátula buena de un álbum no
+// cuenta.
 func TestRecoverReportsOrphanCovers(t *testing.T) {
 	e := newImportEnv(t)
 	pic, _ := picture(t, t.TempDir(), "cover.jpg")
@@ -251,8 +265,62 @@ func TestRecoverReportsOrphanCovers(t *testing.T) {
 			t.Errorf("Recover borró %s", p)
 		}
 	}
-	want := fmt.Sprintf("level=WARN msg=\"carátula que ningún álbum referencia; no se borra, y hasta que se quite puede bloquear las pistas nuevas del álbum\" álbum=%d archivo=covers/%s", without, blocking)
+	want := fmt.Sprintf("level=WARN msg=\"carátula que ningún álbum referencia; se borrará pasado el plazo de gracia, y hasta entonces puede bloquear las pistas nuevas del álbum\" álbum=%d archivo=covers/%s", without, blocking)
 	if !strings.Contains(logs.String(), want) {
 		t.Errorf("falta el aviso %q en el registro:\n%s", want, logs.String())
+	}
+}
+
+// Pasado el plazo de gracia, Recover borra las carátulas sin dueño con forma de
+// carátula. Lo que no lo tiene (nota.txt) y la carátula de un álbum se quedan.
+func TestRecoverRemovesOldOrphanCovers(t *testing.T) {
+	e := newImportEnv(t)
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	withCover := albumIDOf(t, e.pool, e.importOK(t, "a/01.flac", ingest.Imported).TrackID)
+	e.put(t, "b/01.flac", "44100", "-c:a", "flac", "-metadata", "album=Otro")
+	without := albumIDOf(t, e.pool, e.importOK(t, "b/01.flac", ingest.Imported).TrackID)
+
+	good := e.path("biblioteca", "covers", fmt.Sprintf("%d.jpg", withCover))
+	old := e.path("biblioteca", "covers", fmt.Sprintf("%d.jpg", without))
+	young := e.path("biblioteca", "covers", fmt.Sprintf("%d.png", without))
+	note := e.path("biblioteca", "covers", "nota.txt")
+	for _, p := range []string{old, young, note} {
+		if err := os.WriteFile(p, []byte("resto de un corte"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// La carátula buena también es antigua: que sea vieja no basta, tiene que no tener dueño.
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	for _, p := range []string{good, old, note} {
+		if err := os.Chtimes(p, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var logs bytes.Buffer
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := im.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	want := []string{young, note}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("huérfanos que quedan %v, want %v", got, want)
+	}
+	if exists(t, old) {
+		t.Error("la carátula sin dueño y vieja no se borró")
+	}
+	for _, p := range []string{good, young, note} {
+		if !exists(t, p) {
+			t.Errorf("Recover borró %s", p)
+		}
+	}
+	if !strings.Contains(logs.String(), "carátula sin dueño borrada") {
+		t.Errorf("falta el aviso del borrado en el registro: %s", logs.String())
 	}
 }
