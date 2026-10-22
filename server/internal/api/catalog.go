@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -189,11 +192,17 @@ func (s *server) track(w http.ResponseWriter, r *http.Request, _ int64) {
 
 // cover manda la carátula del álbum tal cual. Responde 404 si el álbum no existe o
 // no tiene carátula (ADR-014). El archivo sale de biblioteca/, nunca de una ruta que
-// venga de la petición.
+// venga de la petición. Con size=256 manda la miniatura, o la carátula original si
+// el álbum no la tiene (ADR-017).
 func (s *server) cover(w http.ResponseWriter, r *http.Request, _ int64) {
 	id, ok := pathID(r, "albumId")
 	if !ok {
 		s.badRequest(w, "El id del álbum no es válido.")
+		return
+	}
+	thumb, ok := coverSize(r)
+	if !ok {
+		s.badRequest(w, "size solo puede valer "+strconv.Itoa(library.ThumbSize)+".")
 		return
 	}
 	s.serveCatalog(w, r, func(ctx context.Context, q db.Querier) (reply, error) {
@@ -208,9 +217,20 @@ func (s *server) cover(w http.ResponseWriter, r *http.Request, _ int64) {
 		if err != nil {
 			return nil, fmt.Errorf("carátula del álbum %d: %w", id, err)
 		}
-		f, err := s.library.Open(library.CoverFile(id, ext))
-		if err != nil {
-			return nil, fmt.Errorf("abrir la carátula del álbum %d: %w", id, err)
+		var f *os.File
+		if thumb {
+			f, err = s.library.Open(library.ThumbFile(id))
+			if err == nil {
+				contentType = "image/jpeg"
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("abrir la miniatura del álbum %d: %w", id, err)
+			}
+		}
+		if f == nil {
+			f, err = s.library.Open(library.CoverFile(id, ext))
+			if err != nil {
+				return nil, fmt.Errorf("abrir la carátula del álbum %d: %w", id, err)
+			}
 		}
 		info, err := f.Stat()
 		if err != nil {
@@ -223,6 +243,16 @@ func (s *server) cover(w http.ResponseWriter, r *http.Request, _ int64) {
 			http.ServeContent(w, r, "", info.ModTime(), f)
 		}, nil
 	})
+}
+
+// coverSize lee el parámetro size de la carátula: ausente es el original y 256 la
+// miniatura. Cualquier otro valor no es válido.
+func coverSize(r *http.Request) (thumb, ok bool) {
+	vals, present := r.URL.Query()["size"]
+	if !present {
+		return false, true
+	}
+	return true, len(vals) == 1 && vals[0] == strconv.Itoa(library.ThumbSize)
 }
 
 // coverType es el tipo de imagen de una extensión de carátula. La base solo admite
