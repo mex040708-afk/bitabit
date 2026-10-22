@@ -60,6 +60,33 @@ func TestSetAlbumCoverOnlyWhenMissing(t *testing.T) {
 	}
 }
 
+// AlbumCovers solo devuelve los álbumes pedidos que existen y tienen carátula.
+func TestAlbumCovers(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	withCover, _, err := AlbumOfTrack(ctx, pool, insertTestTrack(t, pool, 1, NewTrack{Artist: "Grupo", Album: "Uno"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	without, _, err := AlbumOfTrack(ctx, pool, insertTestTrack(t, pool, 2, NewTrack{Artist: "Grupo", Album: "Dos"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAlbumCover(ctx, pool, withCover, "png"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := AlbumCovers(ctx, pool, []int64{withCover, without, 999999})
+	if err != nil {
+		t.Fatalf("AlbumCovers: %v", err)
+	}
+	if len(got) != 1 || got[withCover] != "png" {
+		t.Errorf("AlbumCovers = %v, want {%d: png}", got, withCover)
+	}
+	if got, err := AlbumCovers(ctx, pool, nil); err != nil || len(got) != 0 {
+		t.Errorf("AlbumCovers(nil) = %v, %v; want vacío, sin error", got, err)
+	}
+}
+
 // Un formato que no es jpg ni png, o un álbum que no existe, da error y no deja nada.
 func TestSetAlbumCoverRejectsBadInput(t *testing.T) {
 	pool := migratedPool(t)
