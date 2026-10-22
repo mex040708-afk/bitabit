@@ -72,6 +72,9 @@ func readPassword(in io.Reader) (string, error) {
 		return "", fmt.Errorf("leer la contraseña: %w", err)
 	}
 	password := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	// La tubería de PowerShell 5.1 hacia un programa nativo antepone un BOM UTF-8
+	// que nadie ha escrito: sin quitarlo, la contraseña guardada no es la del archivo.
+	password = strings.TrimPrefix(password, "\uFEFF")
 	if err := auth.ValidatePassword(password); err != nil {
 		return "", err
 	}
