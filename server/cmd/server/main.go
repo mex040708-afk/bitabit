@@ -1,7 +1,7 @@
 // El servidor de Bitabit: importa lo que se copia a entrada/ y sirve el audio
 // por /media con enlaces firmados.
 //
-//	bitabit [serve]                     arranca el servidor
+//	bitabit [serve]                     arranca el servidor: /media y la API /api/v1
 //	bitabit link <pista> [orig|aac256]  imprime un enlace firmado (fase 1)
 //	bitabit password                    cambia la contraseña; se lee de la entrada estándar
 //
@@ -32,6 +32,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mex040708-afk/bitabit/server/internal/api"
+	"github.com/mex040708-afk/bitabit/server/internal/auth"
 	"github.com/mex040708-afk/bitabit/server/internal/db"
 	"github.com/mex040708-afk/bitabit/server/internal/ingest"
 	"github.com/mex040708-afk/bitabit/server/internal/stream"
@@ -39,6 +41,8 @@ import (
 
 const (
 	defaultHTTPAddr = "127.0.0.1:8080"
+	// serverVersion se muestra en GET /api/v1/info, para depurar. Se sube al etiquetar.
+	serverVersion   = "0.2.0"
 	shutdownTimeout = 10 * time.Second
 	linkTimeout     = 10 * time.Second
 	usage           = "uso: bitabit [serve] | bitabit link <pista> [orig|aac256] | bitabit password"
@@ -112,6 +116,14 @@ func serve(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /media/{file}", stream.NewHandler(signer, lookup(pool), library, log))
+	mux.Handle("/api/", api.New(api.Config{
+		Pool:          pool,
+		Auth:          auth.NewService(pool),
+		Signer:        signer,
+		Library:       library,
+		ServerVersion: serverVersion,
+		Log:           log,
+	}))
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
