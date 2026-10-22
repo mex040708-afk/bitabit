@@ -19,3 +19,9 @@ func Dir(quality string) string {
 func File(quality string, id int64, ext string) string {
 	return Dir(quality) + "/" + strconv.FormatInt(id, 10) + "." + ext
 }
+
+// Cover es la ruta, dentro de biblioteca/, de la carátula de un álbum. Se deduce
+// del ID del álbum, igual que las versiones de las pistas.
+func Cover(albumID int64, ext string) string {
+	return "covers/" + strconv.FormatInt(albumID, 10) + "." + ext
+}
