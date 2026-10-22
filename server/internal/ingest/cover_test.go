@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -156,5 +159,56 @@ func TestImportKeepsAStrayCover(t *testing.T) {
 	}
 	if !exists(t, e.path("entrada", "a", "02.flac")) {
 		t.Error("la fuente se borró de la entrada")
+	}
+}
+
+// Recover avisa de las carátulas que ningún álbum referencia y las devuelve, sin
+// borrarlas. La carátula buena de un álbum no cuenta.
+func TestRecoverReportsOrphanCovers(t *testing.T) {
+	e := newImportEnv(t)
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	withCover := albumIDOf(t, e.pool, e.importOK(t, "a/01.flac", ingest.Imported).TrackID)
+	e.put(t, "b/01.flac", "44100", "-c:a", "flac", "-metadata", "album=Otro")
+	without := albumIDOf(t, e.pool, e.importOK(t, "b/01.flac", ingest.Imported).TrackID)
+	if withCover == without {
+		t.Fatal("las dos pistas cayeron en el mismo álbum")
+	}
+
+	good := e.path("biblioteca", "covers", fmt.Sprintf("%d.jpg", withCover))
+	blocking := fmt.Sprintf("%d.jpg", without) // el caso de ADR-015: álbum sin cover_ext
+	orphans := []string{
+		e.path("biblioteca", "covers", blocking),
+		e.path("biblioteca", "covers", fmt.Sprintf("%d.png", withCover)),
+		e.path("biblioteca", "covers", "999999.jpg"),
+		e.path("biblioteca", "covers", "nota.txt"),
+	}
+	for _, p := range orphans {
+		if err := os.WriteFile(p, []byte("resto de un corte"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var logs bytes.Buffer
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := im.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	slices.Sort(orphans)
+	if !slices.Equal(got, orphans) {
+		t.Errorf("huérfanos %v, want %v", got, orphans)
+	}
+	for _, p := range append(orphans, good) {
+		if !exists(t, p) {
+			t.Errorf("Recover borró %s", p)
+		}
+	}
+	want := fmt.Sprintf("level=WARN msg=\"carátula que ningún álbum referencia; no se borra, y hasta que se quite puede bloquear las pistas nuevas del álbum\" álbum=%d archivo=covers/%s", without, blocking)
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("falta el aviso %q en el registro:\n%s", want, logs.String())
 	}
 }
