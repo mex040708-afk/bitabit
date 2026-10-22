@@ -28,3 +28,12 @@ func File(quality string, id int64, ext string) string {
 func CoverFile(albumID int64, ext string) string {
 	return CoverDir + "/" + strconv.FormatInt(albumID, 10) + "." + ext
 }
+
+// ThumbSize es el lado largo de la miniatura de una carátula (ADR-017).
+const ThumbSize = 256
+
+// ThumbFile es la ruta de la miniatura de la carátula de un álbum dentro de
+// biblioteca/. Siempre es JPEG, sea cual sea el formato de la carátula.
+func ThumbFile(albumID int64) string {
+	return CoverDir + "/" + strconv.FormatInt(albumID, 10) + "-" + strconv.Itoa(ThumbSize) + ".jpg"
+}
