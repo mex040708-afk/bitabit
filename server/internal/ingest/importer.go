@@ -570,7 +570,7 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 		rel := path.Join(library.CoverDir, c.name)
 		removed := false
 		if mayDelete {
-			removed, err = im.removeOrphanCover(ctx, c.albumID, c.name, c.ext)
+			removed, err = im.removeOrphanCover(ctx, c.albumID, c.name, c.thumb, c.ext)
 			if err != nil {
 				return nil, err
 			}
@@ -626,7 +626,7 @@ func (im *Importer) safeToDeleteCovers(ctx context.Context, onDisk, unowned int)
 // de datos: una importación que acaba de confirmarse la habría hecho suya después
 // del primer vistazo. Solo borra archivos con forma de carátula; lo demás de covers/
 // se avisa y se queda. Devuelve si la borró.
-func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name, ext string) (bool, error) {
+func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name string, thumb bool, ext string) (bool, error) {
 	file := filepath.Join(im.coverDir(), name)
 	info, err := os.Lstat(file)
 	if err != nil {
@@ -641,7 +641,7 @@ func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name, 
 	if err != nil {
 		return false, fmt.Errorf("comprobar la carátula %s antes de borrarla: %w", name, err)
 	}
-	if got, ok := exts[albumID]; ok && got == ext {
+	if got, ok := exts[albumID]; ok && (thumb || got == ext) {
 		return false, nil
 	}
 	if err := os.Remove(file); err != nil {
