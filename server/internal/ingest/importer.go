@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -77,6 +78,7 @@ type Importer struct {
 	inbox   string
 	library string
 	failed  string
+	data    *os.Root // la carpeta de datos: de aquí sale todo acceso a entrada/ (ADR-032)
 	pool    *pgxpool.Pool
 	log     *slog.Logger
 	now     func() time.Time // los tests lo mueven para no esperar 24 horas
@@ -107,6 +109,11 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 			return nil, fmt.Errorf("importación: %s no es una carpeta", dir)
 		}
 	}
+	data, err := os.OpenRoot(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("importación: %w", err)
+	}
+	im.data = data
 	for _, dir := range []string{im.versionDir(db.QualityOriginal), im.versionDir(db.QualityAAC256), im.coverDir()} {
 		if err := os.MkdirAll(dir, dirPerm); err != nil {
 			return nil, fmt.Errorf("importación: crear %s: %w", dir, err)
@@ -163,7 +170,25 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	}
 	src := filepath.Join(im.inbox, filepath.FromSlash(rel))
 
-	sum, _, err := hashFile(src)
+	work, err := os.MkdirTemp(im.library, workDirPrefix)
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: crear la carpeta de trabajo: %w", rel, err)
+	}
+	defer func() {
+		if rerr := os.RemoveAll(work); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("borrar la carpeta de trabajo: %w", rerr))
+		}
+	}()
+
+	// La fuente se abre una sola vez, con el Root, y se copia a la carpeta de
+	// trabajo calculando su hash: la sonda, las versiones y la carátula leen esos
+	// mismos bytes, y ningún proceso externo recibe un nombre de entrada/ que
+	// alguien pueda cambiar por un enlace simbólico (ADR-032).
+	copied, sum, err := im.copySource(rel, work)
+	var unsafe *unsafeSourceError
+	if errors.As(err, &unsafe) {
+		return im.fail(rel, src, Failed, 0, unsafe.Error())
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
@@ -175,7 +200,7 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 		return im.fail(rel, src, Duplicate, id, fmt.Sprintf("ya importado como pista %d", id))
 	}
 
-	info, err := Probe(ctx, src)
+	info, err := Probe(ctx, copied)
 	if errors.Is(err, ErrUnreadable) {
 		return im.fail(rel, src, Failed, 0, err.Error())
 	}
@@ -183,17 +208,7 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
 
-	work, err := os.MkdirTemp(im.library, workDirPrefix)
-	if err != nil {
-		return Result{}, fmt.Errorf("importar %s: crear la carpeta de trabajo: %w", rel, err)
-	}
-	defer func() {
-		if rerr := os.RemoveAll(work); rerr != nil {
-			err = errors.Join(err, fmt.Errorf("borrar la carpeta de trabajo: %w", rerr))
-		}
-	}()
-
-	v, err := BuildVersions(ctx, src, info, work)
+	v, err := BuildVersions(ctx, copied, info, work)
 	if errors.Is(err, ErrUnreadable) {
 		return im.fail(rel, src, Failed, 0, err.Error())
 	}
@@ -201,7 +216,7 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
 
-	cover, err := im.stageCover(ctx, rel, src, work)
+	cover, err := im.stageCover(ctx, rel, copied, work)
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
@@ -650,4 +665,47 @@ func syncDir(dir string) error {
 		return fmt.Errorf("cerrar %s: %w", dir, err)
 	}
 	return nil
+}
+
+// unsafeSourceError es una fuente que no se puede abrir de forma segura: un enlace
+// simbólico que sale de la carpeta de datos, o algo que no es un archivo regular.
+type unsafeSourceError struct{ reason string }
+
+func (e *unsafeSourceError) Error() string { return e.reason }
+
+// copySource abre rel dentro de entrada/ con el Root y la copia a work, y devuelve
+// la ruta de la copia y el SHA-256 de lo copiado. Un archivo que ya no está es un
+// error de sistema (se reintenta); uno que no se puede abrir con seguridad es un
+// unsafeSourceError.
+func (im *Importer) copySource(rel, work string) (copied string, sum [32]byte, err error) {
+	f, err := im.data.Open(path.Join("entrada", rel))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", sum, fmt.Errorf("abrir %s: %w", rel, err)
+	}
+	if err != nil {
+		return "", sum, &unsafeSourceError{reason: "no se puede abrir de forma segura: " + err.Error()}
+	}
+	defer f.Close() // solo lectura: cerrar no puede perder datos
+	// Se mira el archivo ya abierto, no su nombre: entre medias el nombre pudo cambiar.
+	info, err := f.Stat()
+	if err != nil {
+		return "", sum, fmt.Errorf("mirar %s: %w", rel, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", sum, &unsafeSourceError{reason: "no es un archivo regular"}
+	}
+	copied = filepath.Join(work, "copia-de-la-fuente"+strings.ToLower(path.Ext(rel)))
+	out, err := os.OpenFile(copied, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
+	if err != nil {
+		return "", sum, fmt.Errorf("crear la copia de trabajo: %w", err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, h), f); err != nil {
+		return "", sum, errors.Join(fmt.Errorf("copiar %s: %w", rel, err), out.Close())
+	}
+	if err := out.Close(); err != nil {
+		return "", sum, fmt.Errorf("cerrar la copia de trabajo: %w", err)
+	}
+	copy(sum[:], h.Sum(nil))
+	return copied, sum, nil
 }

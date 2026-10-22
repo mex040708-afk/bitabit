@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -322,5 +323,36 @@ func TestRecoverRemovesOldOrphanCovers(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "carátula sin dueño borrada") {
 		t.Errorf("falta el aviso del borrado en el registro: %s", logs.String())
+	}
+}
+
+// Un enlace simbólico en entrada/ que apunta fuera de la carpeta de datos no se
+// lee: la fuente va a fallidos/ sin que su destino llegue a ningún proceso (ADR-032).
+func TestImportRefusesASymlinkLeavingTheDataDir(t *testing.T) {
+	e := newImportEnv(t)
+	outside := filepath.Join(t.TempDir(), "secreto.flac")
+	if err := os.WriteFile(outside, []byte("fuera de la carpeta de datos"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := e.path("entrada", "enlace.flac")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
+	}
+
+	res, err := e.im.Import(context.Background(), "enlace.flac")
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if res.Outcome != ingest.Failed || !strings.Contains(res.Reason, "de forma segura") {
+		t.Errorf("resultado %v (%q), want Failed por no abrirse con seguridad", res.Outcome, res.Reason)
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+	if got := readFile(t, outside); string(got) != "fuera de la carpeta de datos" {
+		t.Error("el archivo de fuera cambió")
+	}
+	if exists(t, link) {
+		t.Error("el enlace sigue en entrada/")
 	}
 }
