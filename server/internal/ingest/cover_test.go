@@ -182,6 +182,7 @@ func TestRecoverReportsOrphanCovers(t *testing.T) {
 		e.path("biblioteca", "covers", fmt.Sprintf("%d.png", withCover)),
 		e.path("biblioteca", "covers", "999999.jpg"),
 		e.path("biblioteca", "covers", "nota.txt"),
+		e.path("biblioteca", "covers", fmt.Sprintf("+%d.jpg", withCover)),
 	}
 	for _, p := range orphans {
 		if err := os.WriteFile(p, []byte("resto de un corte"), 0o640); err != nil {
