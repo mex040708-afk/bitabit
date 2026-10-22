@@ -36,7 +36,7 @@ func testService(t *testing.T) (*Service, *pgxpool.Pool, *time.Time) {
 // login abre una sesión desde testIP y devuelve su token.
 func login(t *testing.T, s *Service, device string) string {
 	t.Helper()
-	token, err := s.Login(context.Background(), testIP, testPassword, device)
+	token, _, err := s.Login(context.Background(), testIP, testPassword, device)
 	if err != nil {
 		t.Fatalf("Login(%q): %v", device, err)
 	}
@@ -107,15 +107,43 @@ func TestLoginStoresOnlyTheTokenHash(t *testing.T) {
 	}
 }
 
-func TestLoginWithoutPasswordFails(t *testing.T) {
+func TestLoginReturnsTheOpenedSession(t *testing.T) {
+	s, pool, _ := testService(t)
+	token, sess, err := s.Login(context.Background(), testIP, testPassword, "Pixel 7a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := sessionID(t, pool, token); sess.ID != want {
+		t.Errorf("id de la sesión %d, want %d", sess.ID, want)
+	}
+	if sess.Device != "Pixel 7a" || sess.CreatedAt.IsZero() || sess.LastUsedAt.IsZero() {
+		t.Errorf("sesión incompleta: %+v", sess)
+	}
+}
+
+// Sin contraseña, el intento cuenta como uno equivocado: la respuesta no revela
+// si la cuenta existe.
+func TestLoginWithoutPasswordCountsAsWrongPassword(t *testing.T) {
 	pool := dbtest.Pool(t)
 	ctx := context.Background()
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	s := NewService(pool)
-	if _, err := s.Login(ctx, testIP, testPassword, "Pixel"); !errors.Is(err, ErrNoPassword) {
-		t.Errorf("Login sin contraseña: %v, want ErrNoPassword", err)
+	_, sess, err := s.Login(ctx, testIP, testPassword, "Pixel")
+	var wrong *WrongPasswordError
+	if !errors.As(err, &wrong) || wrong.AttemptsLeft != maxFailures-1 {
+		t.Fatalf("Login sin contraseña: %v, want WrongPasswordError con %d intentos", err, maxFailures-1)
+	}
+	if (sess != Session{}) {
+		t.Errorf("Login sin contraseña devolvió la sesión %+v", sess)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM sessions").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("hay %d sesiones sin contraseña en la cuenta, want 0", n)
 	}
 }
 
@@ -123,34 +151,39 @@ func TestLoginRejectsBadDeviceNames(t *testing.T) {
 	// Sin base de datos a propósito: el nombre se comprueba antes de leer nada.
 	s := NewService(nil)
 	for _, device := range []string{"", strings.Repeat("d", 65), "\xff"} {
-		if _, err := s.Login(context.Background(), testIP, testPassword, device); !errors.Is(err, ErrInvalidDevice) {
+		if _, _, err := s.Login(context.Background(), testIP, testPassword, device); !errors.Is(err, ErrInvalidDevice) {
 			t.Errorf("Login con el dispositivo %q: %v, want ErrInvalidDevice", device, err)
 		}
 	}
 }
 
+// Los nueve primeros fallos responden 401 con los intentos que quedan; el décimo,
+// 429 con el bloqueo de 24 horas (ADR-014).
 func TestLoginBlocksIPAfterTenFailures(t *testing.T) {
 	s, _, clock := testService(t)
 	ctx := context.Background()
 	other := netip.MustParseAddr("198.51.100.20")
 
-	for i := 1; i <= maxFailures; i++ {
-		_, err := s.Login(ctx, testIP, "contraseña equivocada", "Pixel")
+	for i := 1; i < maxFailures; i++ {
+		_, _, err := s.Login(ctx, testIP, "contraseña equivocada", "Pixel")
 		var wrong *WrongPasswordError
 		if !errors.As(err, &wrong) || wrong.AttemptsLeft != maxFailures-i {
 			t.Fatalf("fallo %d: %v, want WrongPasswordError con %d intentos", i, err, maxFailures-i)
 		}
 	}
-	// Bloqueada: ni la contraseña buena entra.
 	var blocked *BlockedError
-	if _, err := s.Login(ctx, testIP, testPassword, "Pixel"); !errors.As(err, &blocked) || blocked.RetryAfter != blockFor {
-		t.Fatalf("con la contraseña buena: %v, want BlockedError de %v", err, blockFor)
+	if _, _, err := s.Login(ctx, testIP, "contraseña equivocada", "Pixel"); !errors.As(err, &blocked) || blocked.RetryAfter != blockFor {
+		t.Fatalf("décimo fallo: %v, want BlockedError de %v", err, blockFor)
 	}
-	if _, err := s.Login(ctx, other, testPassword, "Pixel"); err != nil {
+	// Bloqueada: ni la contraseña buena entra.
+	if _, _, err := s.Login(ctx, testIP, testPassword, "Pixel"); !errors.As(err, &blocked) {
+		t.Fatalf("con la contraseña buena: %v, want BlockedError", err)
+	}
+	if _, _, err := s.Login(ctx, other, testPassword, "Pixel"); err != nil {
 		t.Errorf("otra IP: %v", err)
 	}
 	*clock = clock.Add(blockFor)
-	if _, err := s.Login(ctx, testIP, testPassword, "Pixel"); err != nil {
+	if _, _, err := s.Login(ctx, testIP, testPassword, "Pixel"); err != nil {
 		t.Errorf("tras 24 horas: %v", err)
 	}
 }
@@ -220,6 +253,46 @@ func TestSessionsExpireAfter180DaysAndAreDeletedAtLogin(t *testing.T) {
 	}
 }
 
+// La lista muestra solo las sesiones vigentes, de la usada más recientemente a la
+// menos.
+func TestSessionsListsOpenDevicesNewestFirst(t *testing.T) {
+	s, pool, _ := testService(t)
+	ctx := context.Background()
+	login(t, s, "Viejo")
+	login(t, s, "Nuevo")
+	if _, err := pool.Exec(ctx, "UPDATE sessions SET last_used_at = now() - interval '1 day' WHERE device = 'Viejo'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE sessions SET last_used_at = now() - interval '181 days' WHERE device = 'Nuevo'"); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.Sessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Device != "Viejo" {
+		t.Errorf("sesiones %+v, want solo la de «Viejo»", list)
+	}
+}
+
+func TestCloseSessionEndsItsToken(t *testing.T) {
+	s, pool, _ := testService(t)
+	ctx := context.Background()
+	token := login(t, s, "Pixel")
+	id := sessionID(t, pool, token)
+
+	if ok, err := s.CloseSession(ctx, id); err != nil || !ok {
+		t.Fatalf("CloseSession = %v, %v; want true", ok, err)
+	}
+	if _, err := s.Authenticate(ctx, token); !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("token de una sesión cerrada: %v, want ErrUnauthorized", err)
+	}
+	if ok, err := s.CloseSession(ctx, id); err != nil || ok {
+		t.Errorf("cerrar otra vez = %v, %v; want false", ok, err)
+	}
+}
+
 func TestSetPasswordClosesSessions(t *testing.T) {
 	s, pool, _ := testService(t)
 	ctx := context.Background()
@@ -239,10 +312,10 @@ func TestSetPasswordClosesSessions(t *testing.T) {
 		}
 	}
 	var wrong *WrongPasswordError
-	if _, err := s.Login(ctx, testIP, testPassword, "Pixel"); !errors.As(err, &wrong) {
+	if _, _, err := s.Login(ctx, testIP, testPassword, "Pixel"); !errors.As(err, &wrong) {
 		t.Errorf("con la contraseña vieja: %v, want WrongPasswordError", err)
 	}
-	if _, err := s.Login(ctx, testIP, "otra contraseña nueva", "Pixel"); err != nil {
+	if _, _, err := s.Login(ctx, testIP, "otra contraseña nueva", "Pixel"); err != nil {
 		t.Errorf("con la contraseña nueva: %v", err)
 	}
 }
@@ -260,7 +333,7 @@ func TestOpenSessionRefusesChangedPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := openSession(ctx, pool, verified, make([]byte, 32), "Pixel")
+	_, err := openSession(ctx, pool, verified, make([]byte, 32), "Pixel")
 	if !errors.Is(err, errPasswordChanged) {
 		t.Fatalf("openSession con el hash viejo: %v, want errPasswordChanged", err)
 	}

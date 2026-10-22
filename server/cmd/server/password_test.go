@@ -68,7 +68,7 @@ func TestSetPasswordReportsClosedSessions(t *testing.T) {
 	}
 
 	svc := auth.NewService(pool)
-	if _, err := svc.Login(ctx, ip, first, "Pixel"); err != nil {
+	if _, _, err := svc.Login(ctx, ip, first, "Pixel"); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
@@ -81,7 +81,7 @@ func TestSetPasswordReportsClosedSessions(t *testing.T) {
 	if strings.Contains(out.String(), second) {
 		t.Error("la salida repite la contraseña")
 	}
-	if _, err := svc.Login(ctx, ip, second, "Pixel"); err != nil {
+	if _, _, err := svc.Login(ctx, ip, second, "Pixel"); err != nil {
 		t.Errorf("con la contraseña nueva: %v", err)
 	}
 }
