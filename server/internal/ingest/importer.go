@@ -434,7 +434,8 @@ func (im *Importer) removeEmptyDirs(dir string) {
 }
 
 // Recover se ejecuta al arrancar. Borra las carpetas de trabajo que dejó un
-// corte y devuelve los archivos de la biblioteca sin pista en la base de datos.
+// corte y devuelve los archivos de la biblioteca sin pista en la base de datos y
+// las carátulas sin álbum que las referencie.
 // Esos no los borra: una cadena de conexión a una base vacía se llevaría la
 // biblioteca entera.
 func (im *Importer) Recover(ctx context.Context) ([]string, error) {
@@ -487,6 +488,60 @@ func (im *Importer) Recover(ctx context.Context) ([]string, error) {
 	slices.Sort(orphans)
 	for _, p := range orphans {
 		im.log.Warn("archivo de la biblioteca sin pista en la base de datos; no se borra", "archivo", p)
+	}
+
+	covers, err := im.orphanCovers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("recuperar: %w", err)
+	}
+	orphans = append(orphans, covers...)
+	slices.Sort(orphans)
+	return orphans, nil
+}
+
+// orphanCovers avisa de las carátulas de covers/ que ningún álbum referencia y
+// devuelve sus rutas. Las deja un corte entre colocar la carátula y confirmar la
+// transacción (ADR-015). Tampoco se borran, por la misma razón que las versiones:
+// con la base de datos equivocada, todas parecerían huérfanas.
+func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
+	files, err := os.ReadDir(im.coverDir())
+	if err != nil {
+		return nil, err
+	}
+	type cover struct {
+		name, ext string
+		albumID   int64
+	}
+	var orphans []string
+	var named []cover
+	for _, f := range files {
+		idText, ext, _ := strings.Cut(f.Name(), ".")
+		id, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil || f.IsDir() {
+			orphans = append(orphans, filepath.Join(im.coverDir(), f.Name()))
+			im.log.Warn("archivo en covers/ que no tiene forma de carátula; no se borra",
+				"archivo", path.Join(library.CoverDir, f.Name()))
+			continue
+		}
+		named = append(named, cover{name: f.Name(), ext: ext, albumID: id})
+	}
+	ids := make([]int64, 0, len(named))
+	for _, c := range named {
+		ids = append(ids, c.albumID)
+	}
+	exts, err := db.AlbumCovers(ctx, im.pool, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range named {
+		if ext, ok := exts[c.albumID]; ok && ext == c.ext {
+			continue
+		}
+		orphans = append(orphans, filepath.Join(im.coverDir(), c.name))
+		// Mientras siga ahí, las pistas nuevas del álbum con una carátula del mismo
+		// formato no se importan: placeAll no pisa un destino que ya existe.
+		im.log.Warn("carátula que ningún álbum referencia; no se borra, y hasta que se quite puede bloquear las pistas nuevas del álbum",
+			"álbum", c.albumID, "archivo", path.Join(library.CoverDir, c.name))
 	}
 	return orphans, nil
 }
