@@ -105,7 +105,7 @@ func (im *Importer) placeCover(ctx context.Context, tx pgx.Tx, trackID int64, c 
 	if c.Thumb != "" {
 		moves = append(moves, [2]string{c.Thumb, im.thumbPath(albumID)})
 	}
-	moved, err := placeAll(moves)
+	moved, err := im.placeAll(moves)
 	placed = append(placed, moved...)
 	if err != nil {
 		return placed, err
