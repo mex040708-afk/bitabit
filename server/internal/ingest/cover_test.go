@@ -194,6 +194,18 @@ func TestImportMakesAThumbnailOnlyForBigCovers(t *testing.T) {
 	if orphans, err := e.im.Recover(context.Background()); err != nil || len(orphans) != 0 {
 		t.Errorf("Recover = %v, %v; la miniatura de un álbum con carátula no es huérfana", orphans, err)
 	}
+	// Ni siquiera pasado el plazo de gracia: la miniatura es .jpg aunque la carátula sea .png.
+	thumbFile := e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", bigAlbum))
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	if err := os.Chtimes(thumbFile, longAgo, longAgo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.im.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if !exists(t, thumbFile) {
+		t.Error("Recover borró la miniatura de un álbum con carátula")
+	}
 }
 
 // pngSize lee el ancho y el alto de un PNG.
