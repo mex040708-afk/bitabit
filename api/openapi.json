@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Bitabit",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "summary": "API propia de Bitabit: sesión, catálogo, búsqueda y enlaces para escuchar.",
     "description": "Contrato de la API que usan las apps de Android y de escritorio. El servidor y los clientes lo obedecen; cualquier cambio empieza aquí.\n\n**Convenciones**\n\n- JSON en UTF-8, con nombres en camelCase. Fechas RFC 3339 en UTC, duraciones en milisegundos e IDs enteros de 64 bits.\n- Los campos de las respuestas van siempre. Si un dato no consta es `null`, salvo las etiquetas de texto (artista, álbum), que van como cadena vacía.\n- Los clientes ignoran los campos que no conocen: las versiones compatibles pueden añadir campos, parámetros opcionales y endpoints. Lo incompatible irá en `/api/v2`.\n- El servidor rechaza con 400 los cuerpos con campos desconocidos o de más de 4 KiB. Un método no previsto en una ruta responde 405.\n- Los errores de `/api` son un objeto `Error`. Los de `/media` son texto, porque los pide el reproductor.\n- Todo pide `Authorization: Bearer {token}`, salvo `GET /api/v1/info`, `POST /api/v1/sessions` y `/media`, que lleva su propia firma.",
     "license": {
@@ -274,9 +274,16 @@
         "tags": ["catálogo"],
         "operationId": "getAlbumCover",
         "summary": "Carátula de un álbum",
-        "description": "La imagen incrustada en la primera pista del álbum que tenga una, tal cual, sin redimensionar.",
+        "description": "La imagen incrustada en la primera pista del álbum que tenga una, tal cual, sin redimensionar. Con `size=256` devuelve en su lugar la miniatura (JPEG de 256 px en su lado largo), o la carátula original si el álbum no tiene miniatura (por ejemplo, porque ya era pequeña o se importó antes de existir). El `Content-Type` dice cuál de las dos llega.",
         "parameters": [
           { "$ref": "#/components/parameters/AlbumId" },
+          {
+            "name": "size",
+            "in": "query",
+            "required": false,
+            "description": "Pide la miniatura. El único valor admitido es 256; cualquier otro, o repetirlo, es un 400. Sin él se devuelve el original.",
+            "schema": { "type": "integer", "enum": [256] }
+          },
           { "$ref": "#/components/parameters/IfNoneMatch" }
         ],
         "responses": {
