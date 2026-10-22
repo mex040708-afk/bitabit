@@ -37,6 +37,7 @@ import (
 	"github.com/mex040708-afk/bitabit/server/internal/db"
 	"github.com/mex040708-afk/bitabit/server/internal/ingest"
 	"github.com/mex040708-afk/bitabit/server/internal/stream"
+	"github.com/mex040708-afk/bitabit/server/internal/subsonic"
 )
 
 const (
@@ -116,9 +117,12 @@ func serve(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /media/{file}", stream.NewHandler(signer, lookup(pool), library, log))
+	// Un solo servicio de autenticación: el bloqueo por IP se comparte entre /api y /rest.
+	authSvc := auth.NewService(pool)
+	mux.Handle("/rest/", subsonic.New(subsonic.Config{Auth: authSvc, ServerVersion: serverVersion, Log: log}))
 	mux.Handle("/api/", api.New(api.Config{
 		Pool:          pool,
-		Auth:          auth.NewService(pool),
+		Auth:          authSvc,
 		Signer:        signer,
 		Library:       library,
 		ServerVersion: serverVersion,
