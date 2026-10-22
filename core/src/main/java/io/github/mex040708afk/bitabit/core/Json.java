@@ -4,9 +4,9 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 /**
- * Lectura del JSON de la API. Gson ignora los campos que no conoce, como pide el
- * contrato: así una versión nueva del servidor, con campos de más, no rompe a los
- * clientes.
+ * Lectura y escritura del JSON de la API. Gson ignora los campos que no conoce, como
+ * pide el contrato: así una versión nueva del servidor, con campos de más, no rompe a
+ * los clientes.
  */
 public final class Json {
 
@@ -27,5 +27,10 @@ public final class Json {
             throw new IllegalArgumentException("cuerpo vacío: se esperaba " + type.getSimpleName());
         }
         return value;
+    }
+
+    /** Escribe un modelo como JSON, para el cuerpo de una petición. */
+    public static String toJson(Object value) {
+        return GSON.toJson(value);
     }
 }

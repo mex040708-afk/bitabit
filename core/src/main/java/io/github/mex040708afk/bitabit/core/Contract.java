@@ -388,6 +388,17 @@ public final class Contract {
         }
     }
 
+    /** Cuerpo de {@code POST /api/v1/sessions}. El contrato no admite más campos. */
+    public static final class LoginRequest {
+        private final String password;
+        private final String device;
+
+        public LoginRequest(String password, String device) {
+            this.password = password;
+            this.device = device;
+        }
+    }
+
     private static Instant instant(String rfc3339) {
         return rfc3339 == null ? null : Instant.parse(rfc3339);
     }
