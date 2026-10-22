@@ -126,7 +126,12 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 // cancele ctx. Los fallos del sistema se registran y el archivo se reintenta en
 // la siguiente pasada.
 func (im *Importer) Run(ctx context.Context, interval, quiet time.Duration) error {
-	inbox := NewInbox(im.inbox, quiet)
+	inboxRoot, err := im.data.OpenRoot("entrada")
+	if err != nil {
+		return fmt.Errorf("abrir la entrada: %w", err)
+	}
+	defer inboxRoot.Close() // solo lectura: cerrar no puede perder datos
+	inbox := NewInboxFS(inboxRoot.FS(), quiet)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
