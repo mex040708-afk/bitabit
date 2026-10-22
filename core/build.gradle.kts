@@ -4,6 +4,10 @@ plugins {
     `java-library`
 }
 
+// Las apps incluyen este build con includeBuild("../core") (ADR-020): Gradle cambia la
+// dependencia io.github.mex040708afk.bitabit:bitabit-core por este proyecto.
+group = "io.github.mex040708afk.bitabit"
+
 repositories {
     mavenCentral()
 }
@@ -21,6 +25,14 @@ tasks.withType<JavaCompile>().configureEach {
     // codificación por defecto de cada equipo.
     options.encoding = "UTF-8"
     options.compilerArgs.add("-Xlint:all")
+}
+
+tasks.jar {
+    manifest {
+        // El escritorio es una aplicación modular: sin este nombre, el módulo automático se
+        // llamaría como el jar.
+        attributes("Automatic-Module-Name" to "io.github.mex040708afk.bitabit.core")
+    }
 }
 
 tasks.test {
