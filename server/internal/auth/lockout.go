@@ -50,10 +50,10 @@ func (l *lockout) blocked(ip netip.Addr, now time.Time) (time.Duration, bool) {
 	return 0, false
 }
 
-// failed anota un fallo de ip y devuelve los intentos que le quedan. El fallo que
-// llega al límite bloquea la IP, y su siguiente intento ya no llega a comprobar
-// la contraseña.
-func (l *lockout) failed(ip netip.Addr, now time.Time) int {
+// failed anota un fallo de ip. Devuelve los intentos que le quedan. El fallo que
+// llega al límite ya bloquea la IP: su propia respuesta es el bloqueo, como pide
+// ADR-014 (los nueve primeros responden 401 y el décimo, 429).
+func (l *lockout) failed(ip netip.Addr, now time.Time) (attemptsLeft int, blocked bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f, ok := l.ips[ip]
@@ -68,8 +68,9 @@ func (l *lockout) failed(ip netip.Addr, now time.Time) int {
 	f.lastFail = now
 	if f.count >= maxFailures {
 		f.blockedUntil = now.Add(blockFor)
+		return 0, true
 	}
-	return max(maxFailures-f.count, 0)
+	return maxFailures - f.count, false
 }
 
 // succeeded borra los fallos de ip: acertar pone su contador a cero.

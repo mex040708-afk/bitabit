@@ -15,16 +15,17 @@ var (
 func TestLockoutBlocksIPAfterTenFailures(t *testing.T) {
 	l := newLockout()
 	for i := 1; i < maxFailures; i++ {
-		if left := l.failed(testIP, start); left != maxFailures-i {
-			t.Fatalf("fallo %d: quedan %d intentos, want %d", i, left, maxFailures-i)
+		left, blocked := l.failed(testIP, start)
+		if left != maxFailures-i || blocked {
+			t.Fatalf("fallo %d: quedan %d intentos, bloqueada %v; want %d, false", i, left, blocked, maxFailures-i)
 		}
 		if _, blocked := l.blocked(testIP, start); blocked {
 			t.Fatalf("bloqueada tras %d fallos", i)
 		}
 	}
-	// El décimo fallo no deja intentos, pero todavía responde como un fallo.
-	if left := l.failed(testIP, start); left != 0 {
-		t.Fatalf("al décimo fallo quedan %d intentos, want 0", left)
+	// El décimo fallo ya bloquea: su respuesta es el bloqueo, no un 401.
+	if left, blocked := l.failed(testIP, start); left != 0 || !blocked {
+		t.Fatalf("al décimo fallo: quedan %d intentos, bloqueada %v; want 0, true", left, blocked)
 	}
 	if wait, blocked := l.blocked(testIP, start); !blocked || wait != blockFor {
 		t.Errorf("blocked = %v, %v; want %v, true", wait, blocked, blockFor)
@@ -45,7 +46,7 @@ func TestLockoutEndsAfterBlockAndStartsOver(t *testing.T) {
 	if _, blocked := l.blocked(testIP, start.Add(blockFor)); blocked {
 		t.Fatal("sigue bloqueada al vencer las 24 horas")
 	}
-	if left := l.failed(testIP, start.Add(blockFor)); left != maxFailures-1 {
+	if left, _ := l.failed(testIP, start.Add(blockFor)); left != maxFailures-1 {
 		t.Errorf("tras el bloqueo quedan %d intentos, want %d", left, maxFailures-1)
 	}
 }
@@ -56,7 +57,7 @@ func TestLockoutSuccessResetsCounter(t *testing.T) {
 		l.failed(testIP, start)
 	}
 	l.succeeded(testIP)
-	if left := l.failed(testIP, start); left != maxFailures-1 {
+	if left, _ := l.failed(testIP, start); left != maxFailures-1 {
 		t.Errorf("tras acertar quedan %d intentos, want %d", left, maxFailures-1)
 	}
 }

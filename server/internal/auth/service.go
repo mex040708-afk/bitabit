@@ -13,8 +13,6 @@ import (
 )
 
 var (
-	// ErrNoPassword: la cuenta todavía no tiene contraseña (bitabit password).
-	ErrNoPassword = errors.New("la cuenta no tiene contraseña")
 	// ErrInvalidDevice: el nombre del dispositivo no tiene de 1 a 64 caracteres.
 	ErrInvalidDevice = errors.New("el nombre del dispositivo tiene de 1 a 64 caracteres")
 
@@ -39,6 +37,14 @@ type BlockedError struct {
 
 func (e *BlockedError) Error() string { return "IP bloqueada" }
 
+// Session es una sesión abierta: lo que la API enseña de cada dispositivo.
+type Session struct {
+	ID         int64
+	Device     string
+	CreatedAt  time.Time
+	LastUsedAt time.Time
+}
+
 // Service comprueba la contraseña, abre sesiones y valida los tokens. Es seguro
 // para uso concurrente.
 type Service struct {
@@ -53,39 +59,55 @@ func NewService(pool *pgxpool.Pool) *Service {
 }
 
 // Login comprueba la contraseña que envía ip y, si es correcta, abre una sesión
-// para device. Devuelve el token, que el cliente guarda: la base de datos solo
-// guarda su SHA-256.
-func (s *Service) Login(ctx context.Context, ip netip.Addr, password, device string) (string, error) {
+// para device. Devuelve el token, que el cliente guarda, y la sesión. La base de
+// datos solo guarda el SHA-256 del token.
+func (s *Service) Login(ctx context.Context, ip netip.Addr, password, device string) (string, Session, error) {
 	// 1.2.3.4 y ::ffff:1.2.3.4 son la misma IP, y no deben tener contadores aparte.
 	ip = ip.Unmap()
 	now := s.now()
 	if wait, blocked := s.lock.blocked(ip, now); blocked {
-		return "", &BlockedError{RetryAfter: wait}
+		return "", Session{}, &BlockedError{RetryAfter: wait}
 	}
 	if !validDevice(device) {
-		return "", ErrInvalidDevice
+		return "", Session{}, ErrInvalidDevice
 	}
-	stored, err := s.storedHash(ctx)
+	stored, hasPassword, err := s.storedHash(ctx)
 	if err != nil {
-		return "", err
+		return "", Session{}, err
+	}
+	// Sin contraseña, el intento cuenta igual que uno equivocado: la respuesta no
+	// revela si la cuenta existe.
+	if !hasPassword {
+		return "", Session{}, s.failure(ip, now)
 	}
 	ok, err := VerifyPassword(password, stored)
 	if err != nil {
-		return "", fmt.Errorf("comprobar la contraseña: %w", err)
+		return "", Session{}, fmt.Errorf("comprobar la contraseña: %w", err)
 	}
 	if !ok {
-		return "", &WrongPasswordError{AttemptsLeft: s.lock.failed(ip, now)}
+		return "", Session{}, s.failure(ip, now)
 	}
 	s.lock.succeeded(ip)
 
 	token, sum, err := NewToken()
 	if err != nil {
-		return "", err
+		return "", Session{}, err
 	}
-	if err := openSession(ctx, s.pool, stored, sum, device); err != nil {
-		return "", err
+	sess, err := openSession(ctx, s.pool, stored, sum, device)
+	if err != nil {
+		return "", Session{}, err
 	}
-	return token, nil
+	return token, sess, nil
+}
+
+// failure anota un fallo de ip y devuelve su error. El fallo que llega al límite
+// ya es el bloqueo: su respuesta es 429, no 401 (ADR-014).
+func (s *Service) failure(ip netip.Addr, now time.Time) error {
+	left, blocked := s.lock.failed(ip, now)
+	if blocked {
+		return &BlockedError{RetryAfter: blockFor}
+	}
+	return &WrongPasswordError{AttemptsLeft: left}
 }
 
 // Authenticate devuelve el id de la sesión del token, o ErrUnauthorized si no
@@ -110,6 +132,36 @@ func (s *Service) Authenticate(ctx context.Context, token string) (int64, error)
 		return 0, fmt.Errorf("anotar el último uso: %w", err)
 	}
 	return id, nil
+}
+
+// Sessions devuelve las sesiones abiertas, de la usada más recientemente a la
+// menos. Las que llevan 180 días sin uso ya no cuentan.
+func (s *Service) Sessions(ctx context.Context) ([]Session, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, device, created_at, last_used_at FROM sessions
+		WHERE last_used_at > now() - interval '180 days'
+		ORDER BY last_used_at DESC, id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("listar las sesiones: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Session, error) {
+		var sess Session
+		err := row.Scan(&sess.ID, &sess.Device, &sess.CreatedAt, &sess.LastUsedAt)
+		return sess, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listar las sesiones: %w", err)
+	}
+	return sessions, nil
+}
+
+// CloseSession cierra la sesión id, y su token deja de valer al momento. Devuelve
+// false si no hay ninguna sesión con ese id.
+func (s *Service) CloseSession(ctx context.Context, id int64) (bool, error) {
+	tag, err := s.pool.Exec(ctx, "DELETE FROM sessions WHERE id = $1", id)
+	if err != nil {
+		return false, fmt.Errorf("cerrar la sesión %d: %w", id, err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // SetPassword pone la contraseña de la cuenta, o la cambia, y cierra todas las
@@ -146,17 +198,17 @@ func SetPassword(ctx context.Context, pool *pgxpool.Pool, password string) (clos
 	return tag.RowsAffected(), nil
 }
 
-// storedHash lee el hash de la contraseña. Sin cuenta, nadie puede entrar.
-func (s *Service) storedHash(ctx context.Context) (string, error) {
-	var hash string
-	err := s.pool.QueryRow(ctx, "SELECT password_hash FROM account WHERE id = 1").Scan(&hash)
+// storedHash lee el hash de la contraseña. hasPassword es false mientras la
+// cuenta no tiene contraseña.
+func (s *Service) storedHash(ctx context.Context) (hash string, hasPassword bool, err error) {
+	err = s.pool.QueryRow(ctx, "SELECT password_hash FROM account WHERE id = 1").Scan(&hash)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNoPassword
+		return "", false, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("leer la contraseña: %w", err)
+		return "", false, fmt.Errorf("leer la contraseña: %w", err)
 	}
-	return hash, nil
+	return hash, true, nil
 }
 
 // openSession guarda la sesión nueva. Bloquea la fila de la cuenta con FOR SHARE
@@ -164,10 +216,10 @@ func (s *Service) storedHash(ctx context.Context) (string, error) {
 // cambio de contraseña a la vez espera a que esta sesión exista y la cierra con
 // las demás. Sin esa comprobación, una sesión abierta con la contraseña vieja
 // podría sobrevivir al cambio.
-func openSession(ctx context.Context, pool *pgxpool.Pool, verified string, sum []byte, device string) (err error) {
+func openSession(ctx context.Context, pool *pgxpool.Pool, verified string, sum []byte, device string) (sess Session, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("abrir la sesión: empezar la transacción: %w", err)
+		return Session{}, fmt.Errorf("abrir la sesión: empezar la transacción: %w", err)
 	}
 	defer func() {
 		if rerr := tx.Rollback(ctx); rerr != nil && !errors.Is(rerr, pgx.ErrTxClosed) {
@@ -177,23 +229,25 @@ func openSession(ctx context.Context, pool *pgxpool.Pool, verified string, sum [
 
 	var current string
 	if err := tx.QueryRow(ctx, "SELECT password_hash FROM account WHERE id = 1 FOR SHARE").Scan(&current); err != nil {
-		return fmt.Errorf("abrir la sesión: leer la cuenta: %w", err)
+		return Session{}, fmt.Errorf("abrir la sesión: leer la cuenta: %w", err)
 	}
 	if current != verified {
-		return errPasswordChanged
+		return Session{}, errPasswordChanged
 	}
 	// Las sesiones sin uso en 180 días ya no valen, así que se borran aquí.
 	if _, err := tx.Exec(ctx, "DELETE FROM sessions WHERE last_used_at <= now() - interval '180 days'"); err != nil {
-		return fmt.Errorf("abrir la sesión: borrar las caducadas: %w", err)
+		return Session{}, fmt.Errorf("abrir la sesión: borrar las caducadas: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO sessions (token_sha256, device, created_at, last_used_at)
-		VALUES ($1, $2, now(), now())`, sum, device); err != nil {
-		return fmt.Errorf("abrir la sesión: guardarla: %w", err)
+	sess.Device = device
+	if err := tx.QueryRow(ctx, `INSERT INTO sessions (token_sha256, device, created_at, last_used_at)
+		VALUES ($1, $2, now(), now())
+		RETURNING id, created_at, last_used_at`, sum, device).Scan(&sess.ID, &sess.CreatedAt, &sess.LastUsedAt); err != nil {
+		return Session{}, fmt.Errorf("abrir la sesión: guardarla: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("abrir la sesión: confirmar: %w", err)
+		return Session{}, fmt.Errorf("abrir la sesión: confirmar: %w", err)
 	}
-	return nil
+	return sess, nil
 }
 
 // validDevice dice si device sirve como nombre de dispositivo. Son los mismos
