@@ -506,7 +506,7 @@ func (im *Importer) Recover(ctx context.Context) ([]string, error) {
 func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 	files, err := os.ReadDir(im.coverDir())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("leer las carátulas: %w", err)
 	}
 	type cover struct {
 		name, ext string
@@ -517,7 +517,8 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 	for _, f := range files {
 		idText, ext, _ := strings.Cut(f.Name(), ".")
 		id, err := strconv.ParseInt(idText, 10, 64)
-		if err != nil || f.IsDir() {
+		// ParseInt acepta «+12»; la carátula del álbum 12 solo puede llamarse «12».
+		if err != nil || f.IsDir() || idText != strconv.FormatInt(id, 10) {
 			orphans = append(orphans, filepath.Join(im.coverDir(), f.Name()))
 			im.log.Warn("archivo en covers/ que no tiene forma de carátula; no se borra",
 				"archivo", path.Join(library.CoverDir, f.Name()))
@@ -531,7 +532,7 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 	}
 	exts, err := db.AlbumCovers(ctx, im.pool, ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("carátulas sin dueño: %w", err)
 	}
 	for _, c := range named {
 		if ext, ok := exts[c.albumID]; ok && ext == c.ext {
