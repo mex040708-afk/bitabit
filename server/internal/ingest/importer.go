@@ -522,11 +522,16 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 	type cover struct {
 		name, ext string
 		albumID   int64
+		thumb     bool // miniatura: sobra si el álbum no tiene carátula
 	}
 	var orphans []string
 	var named []cover
 	for _, f := range files {
 		idText, ext, _ := strings.Cut(f.Name(), ".")
+		thumb := false
+		if t, ok := strings.CutSuffix(idText, "-"+strconv.Itoa(library.ThumbSize)); ok && ext == "jpg" {
+			idText, thumb = t, true
+		}
 		id, err := strconv.ParseInt(idText, 10, 64)
 		// ParseInt acepta «+12»; la carátula del álbum 12 solo puede llamarse «12».
 		// Y solo se borra lo que el importador pudo escribir: ID positivo y jpg o png
@@ -537,7 +542,7 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 				"archivo", path.Join(library.CoverDir, f.Name()))
 			continue
 		}
-		named = append(named, cover{name: f.Name(), ext: ext, albumID: id})
+		named = append(named, cover{name: f.Name(), ext: ext, albumID: id, thumb: thumb})
 	}
 	ids := make([]int64, 0, len(named))
 	for _, c := range named {
@@ -558,7 +563,7 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	for _, c := range named {
-		if ext, ok := exts[c.albumID]; ok && ext == c.ext {
+		if ext, ok := exts[c.albumID]; ok && (c.thumb || ext == c.ext) {
 			continue
 		}
 		file := filepath.Join(im.coverDir(), c.name)
@@ -650,6 +655,10 @@ func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name, 
 
 func (im *Importer) coverDir() string {
 	return filepath.Join(im.library, library.CoverDir)
+}
+
+func (im *Importer) thumbPath(albumID int64) string {
+	return filepath.Join(im.library, filepath.FromSlash(library.ThumbFile(albumID)))
 }
 
 func (im *Importer) coverPath(albumID int64, ext string) string {
