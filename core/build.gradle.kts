@@ -10,11 +10,16 @@ repositories {
 
 dependencies {
     implementation(libs.gson)
+    implementation(libs.okhttp)
     testImplementation(libs.junit)
+    testImplementation(libs.mockwebserver)
 }
 
 tasks.withType<JavaCompile>().configureEach {
     options.release.set(17)
+    // Los comentarios y los textos llevan tildes: el resultado no debe depender de la
+    // codificación por defecto de cada equipo.
+    options.encoding = "UTF-8"
     options.compilerArgs.add("-Xlint:all")
 }
 
