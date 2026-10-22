@@ -4,6 +4,8 @@ media3 = "1.11.1"
 junit = "4.13.2"
 
 [libraries]
+# Sin versión: settings.gradle.kts la sustituye por el código de ../core (ADR-020).
+bitabit-core = { module = "io.github.mex040708afk.bitabit:core" }
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
