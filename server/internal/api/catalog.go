@@ -208,7 +208,7 @@ func (s *server) cover(w http.ResponseWriter, r *http.Request, _ int64) {
 		if err != nil {
 			return nil, fmt.Errorf("carátula del álbum %d: %w", id, err)
 		}
-		f, err := s.library.Open(library.Cover(id, ext))
+		f, err := s.library.Open(library.CoverFile(id, ext))
 		if err != nil {
 			return nil, fmt.Errorf("abrir la carátula del álbum %d: %w", id, err)
 		}
