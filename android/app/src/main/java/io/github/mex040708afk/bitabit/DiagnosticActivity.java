@@ -1,6 +1,5 @@
 package io.github.mex040708afk.bitabit;
 
-import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
@@ -10,6 +9,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
 import androidx.annotation.OptIn;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
@@ -24,12 +24,13 @@ import androidx.media3.exoplayer.audio.AudioSink;
 import androidx.media3.exoplayer.audio.DefaultAudioSink;
 
 /**
- * App mínima de la fase 1 (ADR-012): reproduce un enlace de «bitabit link» y,
- * al terminar, enseña el MD5 de lo que ha sonado para compararlo con el del
- * original en el servidor.
+ * Diagnóstico, que es la app mínima de la fase 1 (ADR-012): reproduce un enlace de
+ * «bitabit link» y, al terminar, enseña el MD5 de lo que ha sonado para compararlo con
+ * el del original en el servidor. Se conserva para comprobar la reproducción sin pasar
+ * por la sesión (ADR-023).
  */
 @OptIn(markerClass = UnstableApi.class)
-public final class MainActivity extends Activity {
+public final class DiagnosticActivity extends AppCompatActivity {
 
     private static final String TAG = "Bitabit";
     /** Extra para pasar el enlace al arrancar, en las pruebas con adb. */
@@ -47,7 +48,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+        setContentView(R.layout.activity_diagnostic);
         server = findViewById(R.id.server);
         link = findViewById(R.id.link);
         status = findViewById(R.id.status);
