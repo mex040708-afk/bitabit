@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mex040708-afk/bitabit/server/internal/auth"
+	"github.com/mex040708-afk/bitabit/server/internal/limits"
 	"github.com/mex040708-afk/bitabit/server/internal/stream"
 )
 
@@ -204,6 +205,12 @@ func (s *server) authenticate(r *http.Request) *response {
 		return s.fail(codeWrongCredentials, "Demasiados intentos: esta IP está bloqueada.")
 	case errors.As(err, &wrong):
 		return s.fail(codeWrongCredentials, "Usuario o contraseña incorrectos.")
+	case errors.Is(err, auth.ErrBusy):
+		// Demasiadas comprobaciones a la vez (ADR-040): 503 con Retry-After, y no cuenta
+		// como fallo de contraseña.
+		resp := s.fail(codeGeneric, "Servidor ocupado: reintenta en unos segundos.")
+		resp.retryAfter = limits.RetryAfterSeconds(auth.VerifyRetryAfter)
+		return resp
 	}
 	return s.internal(r, err)
 }
@@ -247,6 +254,7 @@ type response struct {
 	Version       string          `xml:"version,attr" json:"version"`
 	Type          string          `xml:"type,attr" json:"type"`
 	ServerVersion string          `xml:"serverVersion,attr" json:"serverVersion"`
+	retryAfter    string          // no se escribe: si no está vacío, la respuesta es un 503 con Retry-After
 	OpenSubsonic  bool            `xml:"openSubsonic,attr" json:"openSubsonic"`
 	Error         *apiError       `xml:"error,omitempty" json:"error,omitempty"`
 	License       *license        `xml:"license,omitempty" json:"license,omitempty"`
@@ -315,6 +323,10 @@ func (s *server) write(w http.ResponseWriter, r *http.Request, resp *response) {
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
+	if resp.retryAfter != "" {
+		w.Header().Set("Retry-After", resp.retryAfter)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
 	if _, err := w.Write(body); err != nil {
 		s.log.Warn("enviar la respuesta de /rest", "error", err)
 	}
