@@ -83,6 +83,13 @@ if psql -d postgres -AtX -c "SELECT 1 FROM pg_database WHERE datname = '$db'" | 
 else
 	createdb -- "$db" || die 3 "no se pudo crear la base «$db»"
 fi
+# Las funciones de búsqueda dependen de unaccent y pg_trgm (migración 0004). Una
+# copia de la base entera ya trae su CREATE EXTENSION, pero una de un esquema no; son
+# extensiones de confianza, así que el dueño de la base puede crearlas.
+psql -d "$db" -qX -v ON_ERROR_STOP=1 \
+	-c "CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA public" \
+	-c "CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public" >/dev/null ||
+	die 3 "no se pudieron crear las extensiones unaccent y pg_trgm en «$db»"
 pg_restore --no-owner --no-privileges --exit-on-error --dbname="$db" -- "$dump" || die 3 "falló pg_restore"
 
 # Carpeta destino: entrada/ y fallidos/ vacías, y la biblioteca de la copia.
