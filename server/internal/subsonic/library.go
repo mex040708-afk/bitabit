@@ -15,6 +15,7 @@ import (
 const (
 	defaultListSize = 10
 	maxListSize     = 500
+	maxOffset       = 1 << 30
 	defaultSearch   = 20
 )
 
@@ -236,7 +237,9 @@ func (s *server) window(r *http.Request, sizeName, offsetName string, defaultSiz
 		}
 		*p.dst = n
 	}
-	return min(size, maxListSize), offset, nil
+	// Sin tope, offset+size desbordaría con un offset cercano a MaxInt y search3
+	// pasaría un límite negativo a PostgreSQL (error 500).
+	return min(size, maxListSize), min(offset, maxOffset), nil
 }
 
 // slice devuelve hasta size elementos de items desde offset.
