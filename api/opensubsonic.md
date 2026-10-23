@@ -35,5 +35,9 @@ Usa siempre HTTPS fuera de casa: con `u` y `p` la contraseña viaja en cada peti
 | `getMusicFolders` | sí | 2 | hecha: una carpeta, «Biblioteca» (id 1) |
 | `getArtists` | sí | 2 | hecha: agrupados por inicial, `#` para lo que no empieza por letra; `ignoredArticles` vacío |
 | `getArtist` | sí | 2 | hecha: con sus álbumes; error 10 sin `id`, error 70 si no existe |
-| `getAlbum`, `getAlbumList2`, `getSong`, `search3`, `getCoverArt` | sí | 2 | pendiente |
+| `getAlbum` | sí | 2 | hecha: álbum con sus pistas (la versión original, o la única que haya) |
+| `getSong` | sí | 2 | hecha |
+| `getAlbumList2` | sí | 2 | hecha: `newest` por fecha de importación; el resto, por nombre. `size` (10, máx. 500) y `offset`. Sin historial ni favoritos, `random`, `frequent`, `recent`, `highest`, `starred` y `byYear` caen en el orden por nombre |
+| `search3` | sí | 2 | hecha: artistas, álbumes y pistas con `artistCount`/`albumCount`/`songCount` y sus `…Offset`. Una búsqueda vacía (`""`) lista artistas y álbumes, sin pistas |
+| `getCoverArt` | sí | 2 | hecha: `id` es el del álbum (el campo `coverArt`); con `size` ≤ 256 sirve la miniatura si existe |
 | `stream`, `download`, `scrobble` | sí | 3 | pendiente |

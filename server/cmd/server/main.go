@@ -119,7 +119,7 @@ func serve(log *slog.Logger) error {
 	mux.Handle("GET /media/{file}", stream.NewHandler(signer, lookup(pool), library, log))
 	// Un solo servicio de autenticación: el bloqueo por IP se comparte entre /api y /rest.
 	authSvc := auth.NewService(pool)
-	mux.Handle("/rest/", subsonic.New(subsonic.Config{Pool: pool, Auth: authSvc, ServerVersion: serverVersion, Log: log}))
+	mux.Handle("/rest/", subsonic.New(subsonic.Config{Library: library, Pool: pool, Auth: authSvc, ServerVersion: serverVersion, Log: log}))
 	mux.Handle("/api/", api.New(api.Config{
 		Pool:          pool,
 		Auth:          authSvc,

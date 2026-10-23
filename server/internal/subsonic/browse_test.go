@@ -1,9 +1,13 @@
 package subsonic
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -110,6 +114,117 @@ func TestBrowseWithTheCatalog(t *testing.T) {
 	for _, id := range []string{"999999", "abc", "-1"} {
 		if got := errCode(t, get(t, h, http.MethodGet, "/rest/getArtist", creds(url.Values{"id": {id}}))); got != codeNotFound {
 			t.Errorf("id %q: error %d, want %d", id, got, codeNotFound)
+		}
+	}
+}
+
+// getAlbum, getSong, getAlbumList2, search3 y getCoverArt sobre un catálogo real.
+func TestLibraryFunctionsWithTheCatalog(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	flac := db.TrackFile{Quality: db.QualityOriginal, Ext: "flac", Codec: "flac", Lossless: true, SampleRate: 96000, Bits: 24, Channels: 2, Bytes: 12_000_000, SHA256: [32]byte{1}}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackID, err := db.InsertTrack(ctx, tx, db.NewTrack{Title: "Canción uno", Artist: "Grupo", Album: "Disco", ReleaseDate: "1977-05-25",
+		TrackNumber: 3, DiscNumber: 1, Duration: 2 * time.Minute, SourceSHA256: [32]byte{1}}, []db.TrackFile{flac})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var albumID int64
+	if err := pool.QueryRow(ctx, "SELECT album_id FROM tracks WHERE id = $1", trackID).Scan(&albumID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE albums SET cover_ext = 'jpg' WHERE id = $1", albumID); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "covers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cover, thumb := []byte("\xff\xd8\xff\xe0original"), []byte("\xff\xd8\xff\xe0miniatura")
+	if err := os.WriteFile(filepath.Join(dir, "covers", fmt.Sprintf("%d.jpg", albumID)), cover, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "covers", fmt.Sprintf("%d-256.jpg", albumID)), thumb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+
+	h := New(Config{Library: root, Pool: pool, Auth: &fakeAuth{}, ServerVersion: "prueba", Log: quietLog()})
+	creds := func(extra url.Values) url.Values {
+		extra.Set("apiKey", "bueno")
+		extra.Set("f", "json")
+		return extra
+	}
+	albumIDText, trackIDText := fmt.Sprint(albumID), fmt.Sprint(trackID)
+
+	album := jsonBody(t, get(t, h, http.MethodGet, "/rest/getAlbum", creds(url.Values{"id": {albumIDText}})))["album"].(map[string]any)
+	songs := album["song"].([]any)
+	if album["name"] != "Disco" || album["coverArt"] != albumIDText || len(songs) != 1 {
+		t.Fatalf("álbum: %v", album)
+	}
+	song := songs[0].(map[string]any)
+	if song["id"] != trackIDText || song["suffix"] != "flac" || song["contentType"] != "audio/flac" || song["duration"].(float64) != 120 ||
+		song["track"].(float64) != 3 || song["bitDepth"].(float64) != 24 || song["samplingRate"].(float64) != 96000 || song["bitRate"].(float64) != 800 {
+		t.Errorf("pista: %v", song)
+	}
+
+	one := jsonBody(t, get(t, h, http.MethodGet, "/rest/getSong", creds(url.Values{"id": {trackIDText}})))["song"].(map[string]any)
+	if one["title"] != "Canción uno" || one["albumId"] != albumIDText {
+		t.Errorf("getSong: %v", one)
+	}
+
+	list := jsonBody(t, get(t, h, http.MethodGet, "/rest/getAlbumList2", creds(url.Values{"type": {"newest"}, "size": {"5"}})))["albumList2"].(map[string]any)["album"].([]any)
+	if len(list) != 1 {
+		t.Errorf("getAlbumList2: %v", list)
+	}
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getAlbumList2", creds(url.Values{"type": {"inventado"}}))); got != codeGeneric {
+		t.Errorf("tipo desconocido: error %d", got)
+	}
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getAlbumList2", creds(url.Values{"size": {"-1"}}))); got != codeGeneric {
+		t.Errorf("size negativo: error %d", got)
+	}
+
+	found := jsonBody(t, get(t, h, http.MethodGet, "/rest/search3", creds(url.Values{"query": {"canci"}})))["searchResult3"].(map[string]any)
+	if len(found["song"].([]any)) != 1 {
+		t.Errorf("search3 por título: %v", found)
+	}
+	all := jsonBody(t, get(t, h, http.MethodGet, "/rest/search3", creds(url.Values{"query": {`""`}})))["searchResult3"].(map[string]any)
+	if len(all["artist"].([]any)) != 1 || len(all["album"].([]any)) != 1 {
+		t.Errorf("search3 vacío debe listar la biblioteca: %v", all)
+	}
+
+	for _, c := range []struct {
+		size string
+		want []byte
+	}{{"", cover}, {"256", thumb}, {"128", thumb}, {"512", cover}} {
+		form := creds(url.Values{"id": {albumIDText}})
+		if c.size != "" {
+			form.Set("size", c.size)
+		}
+		rec := get(t, h, http.MethodGet, "/rest/getCoverArt", form)
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), c.want) || rec.Header().Get("Content-Type") != "image/jpeg" {
+			t.Errorf("getCoverArt size=%q: %d %q", c.size, rec.Code, rec.Body)
+		}
+	}
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getCoverArt", creds(url.Values{"id": {"999999"}}))); got != codeNotFound {
+		t.Errorf("carátula inexistente: error %d", got)
+	}
+	for _, f := range []string{"getAlbum", "getSong"} {
+		if got := errCode(t, get(t, h, http.MethodGet, "/rest/"+f, creds(url.Values{}))); got != codeMissingParameter {
+			t.Errorf("%s sin id: error %d", f, got)
 		}
 	}
 }

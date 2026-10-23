@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ type Authenticator interface {
 
 // Config son las dependencias de la capa.
 type Config struct {
+	Library       *os.Root      // biblioteca/, de donde salen las carátulas
 	Pool          *pgxpool.Pool // el catálogo; sin él solo funcionan las funciones sin datos
 	Auth          Authenticator
 	ServerVersion string
@@ -54,6 +56,7 @@ type Config struct {
 }
 
 type server struct {
+	library *os.Root
 	pool    *pgxpool.Pool
 	auth    Authenticator
 	version string
@@ -62,34 +65,44 @@ type server struct {
 
 // New devuelve el manejador de /rest/. Se monta con mux.Handle("/rest/", …).
 func New(c Config) http.Handler {
-	s := &server{pool: c.Pool, auth: c.Auth, version: c.ServerVersion, log: c.Log}
+	s := &server{library: c.Library, pool: c.Pool, auth: c.Auth, version: c.ServerVersion, log: c.Log}
 	mux := http.NewServeMux()
 	endpoints := []struct {
 		name   string
-		handle func(*http.Request) *response
+		handle func(http.ResponseWriter, *http.Request) *response
 		auth   bool
 	}{
-		{"ping", func(*http.Request) *response { return s.ok() }, true},
-		{"getLicense", s.getLicense, true},
+		{"ping", plain(func(*http.Request) *response { return s.ok() }), true},
+		{"getLicense", plain(s.getLicense), true},
 		// Sin autenticación, como dice la especificación.
-		{"getOpenSubsonicExtensions", s.getExtensions, false},
-		{"getMusicFolders", s.getMusicFolders, true},
-		{"getArtists", s.getArtists, true},
-		{"getArtist", s.getArtist, true},
+		{"getOpenSubsonicExtensions", plain(s.getExtensions), false},
+		{"getMusicFolders", plain(s.getMusicFolders), true},
+		{"getArtists", plain(s.getArtists), true},
+		{"getArtist", plain(s.getArtist), true},
+		{"getAlbum", plain(s.getAlbum), true},
+		{"getSong", plain(s.getSong), true},
+		{"getAlbumList2", plain(s.getAlbumList2), true},
+		{"search3", plain(s.search3), true},
+		{"getCoverArt", s.getCoverArt, true},
 	}
 	for _, e := range endpoints {
 		mux.HandleFunc("/rest/"+e.name, s.endpoint(e.handle, e.auth))
 		mux.HandleFunc("/rest/"+e.name+".view", s.endpoint(e.handle, e.auth))
 	}
-	mux.HandleFunc("/rest/", s.endpoint(func(*http.Request) *response {
+	mux.HandleFunc("/rest/", s.endpoint(plain(func(*http.Request) *response {
 		return s.fail(codeGeneric, "Función no implementada.")
-	}, true))
+	}), true))
 	return mux
+}
+
+// plain adapta una función que solo devuelve datos.
+func plain(f func(*http.Request) *response) func(http.ResponseWriter, *http.Request) *response {
+	return func(_ http.ResponseWriter, r *http.Request) *response { return f(r) }
 }
 
 // endpoint lee los parámetros, autentica si hace falta y escribe la respuesta en
 // el formato pedido. Los parámetros llevan las credenciales: no se registran.
-func (s *server) endpoint(handle func(*http.Request) *response, needsAuth bool) http.HandlerFunc {
+func (s *server) endpoint(handle func(http.ResponseWriter, *http.Request) *response, needsAuth bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			w.Header().Set("Allow", "GET, POST")
@@ -107,7 +120,10 @@ func (s *server) endpoint(handle func(*http.Request) *response, needsAuth bool) 
 			resp = s.authenticate(r)
 		}
 		if resp == nil {
-			resp = handle(r)
+			// Un manejador que escribe él mismo la respuesta (una imagen) devuelve nil.
+			if resp = handle(w, r); resp == nil {
+				return
+			}
 		}
 		s.write(w, r, resp)
 	}
@@ -196,19 +212,23 @@ func (s *server) getExtensions(*http.Request) *response {
 // response es la respuesta de cualquier función: los mismos campos salen en JSON,
 // dentro de "subsonic-response", y en XML.
 type response struct {
-	XMLName       xml.Name      `xml:"subsonic-response" json:"-"`
-	Xmlns         string        `xml:"xmlns,attr" json:"-"`
-	Status        string        `xml:"status,attr" json:"status"`
-	Version       string        `xml:"version,attr" json:"version"`
-	Type          string        `xml:"type,attr" json:"type"`
-	ServerVersion string        `xml:"serverVersion,attr" json:"serverVersion"`
-	OpenSubsonic  bool          `xml:"openSubsonic,attr" json:"openSubsonic"`
-	Error         *apiError     `xml:"error,omitempty" json:"error,omitempty"`
-	License       *license      `xml:"license,omitempty" json:"license,omitempty"`
-	Extensions    []extension   `xml:"openSubsonicExtensions,omitempty" json:"openSubsonicExtensions,omitempty"`
-	MusicFolders  *musicFolders `xml:"musicFolders,omitempty" json:"musicFolders,omitempty"`
-	Artists       *artistsID3   `xml:"artists,omitempty" json:"artists,omitempty"`
-	Artist        *artistID3    `xml:"artist,omitempty" json:"artist,omitempty"`
+	XMLName       xml.Name        `xml:"subsonic-response" json:"-"`
+	Xmlns         string          `xml:"xmlns,attr" json:"-"`
+	Status        string          `xml:"status,attr" json:"status"`
+	Version       string          `xml:"version,attr" json:"version"`
+	Type          string          `xml:"type,attr" json:"type"`
+	ServerVersion string          `xml:"serverVersion,attr" json:"serverVersion"`
+	OpenSubsonic  bool            `xml:"openSubsonic,attr" json:"openSubsonic"`
+	Error         *apiError       `xml:"error,omitempty" json:"error,omitempty"`
+	License       *license        `xml:"license,omitempty" json:"license,omitempty"`
+	Extensions    []extension     `xml:"openSubsonicExtensions,omitempty" json:"openSubsonicExtensions,omitempty"`
+	MusicFolders  *musicFolders   `xml:"musicFolders,omitempty" json:"musicFolders,omitempty"`
+	Artists       *artistsID3     `xml:"artists,omitempty" json:"artists,omitempty"`
+	Artist        *artistID3      `xml:"artist,omitempty" json:"artist,omitempty"`
+	Album         *albumWithSongs `xml:"album,omitempty" json:"album,omitempty"`
+	Song          *songID3        `xml:"song,omitempty" json:"song,omitempty"`
+	AlbumList2    *albumList      `xml:"albumList2,omitempty" json:"albumList2,omitempty"`
+	SearchResult3 *searchResult3  `xml:"searchResult3,omitempty" json:"searchResult3,omitempty"`
 }
 
 type apiError struct {

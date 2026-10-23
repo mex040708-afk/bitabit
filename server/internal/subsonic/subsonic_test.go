@@ -165,7 +165,7 @@ func TestGetLicenseAndUnknownFunction(t *testing.T) {
 	if license, _ := body["license"].(map[string]any); license["valid"] != true {
 		t.Errorf("licencia inesperada: %v", body)
 	}
-	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getSong", creds)); got != codeGeneric {
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getPlaylists", creds)); got != codeGeneric {
 		t.Errorf("función sin implementar: error %d, want %d", got, codeGeneric)
 	}
 }
