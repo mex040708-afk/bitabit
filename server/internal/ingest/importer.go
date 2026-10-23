@@ -40,6 +40,10 @@ const (
 	// para que Recover la borre. Es mucho más de lo que dura cualquier importación
 	// (ADR-015): una más joven puede ser de una importación que aún no ha confirmado.
 	OrphanCoverGrace = 24 * time.Hour
+
+	// maxOrphanCoverDeletes es lo más que Recover borra de golpe si eso es más de la
+	// mitad de las carátulas (ver safeToDeleteCovers).
+	maxOrphanCoverDeletes = 20
 )
 
 // Outcome es lo que pasó con un archivo de la entrada.
@@ -548,15 +552,28 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("carátulas sin dueño: %w", err)
 	}
+	unowned := 0
+	for _, c := range named {
+		if ext, ok := exts[c.albumID]; !ok || (!c.thumb && ext != c.ext) {
+			unowned++
+		}
+	}
+	mayDelete, err := im.safeToDeleteCovers(ctx, len(named), unowned)
+	if err != nil {
+		return nil, err
+	}
 	for _, c := range named {
 		if ext, ok := exts[c.albumID]; ok && (c.thumb || ext == c.ext) {
 			continue
 		}
 		file := filepath.Join(im.coverDir(), c.name)
 		rel := path.Join(library.CoverDir, c.name)
-		removed, err := im.removeOrphanCover(ctx, c.albumID, c.name, c.thumb, c.ext)
-		if err != nil {
-			return nil, err
+		removed := false
+		if mayDelete {
+			removed, err = im.removeOrphanCover(ctx, c.albumID, c.name, c.thumb, c.ext)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if removed {
 			im.log.Warn("carátula sin dueño borrada: llevaba más de un día sin álbum que la referencie y se puede regenerar del original",
@@ -574,6 +591,34 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 
 func (im *Importer) versionDir(quality string) string {
 	return filepath.Join(im.library, library.Dir(quality))
+}
+
+// safeToDeleteCovers es la salvaguarda de proporción del borrado de carátulas: con la
+// base de datos equivocada, vacía o de una copia antigua, todas las carátulas de
+// covers/ parecerían huérfanas y el plazo de 24 h (que mira la fecha del archivo, no
+// cuánto tiempo lleva la base mal) no protege. No se borra nada si la base no tiene
+// ningún álbum con carátula mientras en disco hay carátulas, ni si se iba a borrar
+// más de la mitad y más de maxOrphanCoverDeletes. Se avisa y se deja para que lo
+// mire una persona.
+func (im *Importer) safeToDeleteCovers(ctx context.Context, onDisk, unowned int) (bool, error) {
+	if unowned == 0 {
+		return true, nil
+	}
+	inDB, err := db.CountAlbumCovers(ctx, im.pool)
+	if err != nil {
+		return false, fmt.Errorf("recuperar: %w", err)
+	}
+	switch {
+	case inDB == 0 && onDisk > 0:
+		im.log.Warn("no se borra ninguna carátula sin dueño: la base de datos no tiene ninguna carátula y en covers/ hay; ¿es la base de datos que corresponde a esta biblioteca?",
+			"en_disco", onDisk)
+		return false, nil
+	case unowned > maxOrphanCoverDeletes && unowned*2 > onDisk:
+		im.log.Warn("no se borra ninguna carátula sin dueño: serían más de la mitad de las de covers/; ¿es la base de datos que corresponde a esta biblioteca?",
+			"sin_dueño", unowned, "en_disco", onDisk)
+		return false, nil
+	}
+	return true, nil
 }
 
 // removeOrphanCover borra la carátula name del álbum albumID si lleva más de
