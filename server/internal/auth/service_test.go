@@ -374,3 +374,22 @@ func TestCheckPasswordOpensNoSessionAndSharesTheLockout(t *testing.T) {
 		t.Errorf("Login desde una IP bloqueada por CheckPassword: %v, want BlockedError", err)
 	}
 }
+
+// Cambiar la contraseña invalida lo que CheckPassword recordaba de la vieja.
+func TestCheckPasswordForgetsTheOldPasswordAfterAChange(t *testing.T) {
+	s, pool, _ := testService(t)
+	ctx := context.Background()
+	if err := s.CheckPassword(ctx, testIP, testPassword); err != nil { // la deja en la caché
+		t.Fatal(err)
+	}
+	if _, err := SetPassword(ctx, pool, "una contraseña nueva"); err != nil {
+		t.Fatal(err)
+	}
+	var wrong *WrongPasswordError
+	if err := s.CheckPassword(ctx, testIP, testPassword); !errors.As(err, &wrong) {
+		t.Fatalf("la contraseña vieja siguió valiendo tras el cambio: %v", err)
+	}
+	if err := s.CheckPassword(ctx, testIP, "una contraseña nueva"); err != nil {
+		t.Fatalf("la nueva no vale: %v", err)
+	}
+}

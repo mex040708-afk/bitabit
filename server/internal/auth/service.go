@@ -48,14 +48,15 @@ type Session struct {
 // Service comprueba la contraseña, abre sesiones y valida los tokens. Es seguro
 // para uso concurrente.
 type Service struct {
-	pool *pgxpool.Pool
-	lock *lockout
-	now  func() time.Time // los tests lo cambian para no esperar 24 horas
+	pool     *pgxpool.Pool
+	lock     *lockout
+	verified *verifiedCache   // contraseñas ya comprobadas para CheckPassword
+	now      func() time.Time // los tests lo cambian para no esperar 24 horas
 }
 
 // NewService trabaja con la base de datos de pool.
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, lock: newLockout(), now: time.Now}
+	return &Service{pool: pool, lock: newLockout(), verified: newVerifiedCache(), now: time.Now}
 }
 
 // Login comprueba la contraseña que envía ip y, si es correcta, abre una sesión
@@ -116,6 +117,10 @@ func (s *Service) CheckPassword(ctx context.Context, ip netip.Addr, password str
 	if !hasPassword {
 		return s.failure(ip, now)
 	}
+	if s.verified.has(stored, password, now) {
+		s.lock.succeeded(ip)
+		return nil
+	}
 	ok, err := VerifyPassword(password, stored)
 	if err != nil {
 		return fmt.Errorf("comprobar la contraseña: %w", err)
@@ -123,6 +128,7 @@ func (s *Service) CheckPassword(ctx context.Context, ip netip.Addr, password str
 	if !ok {
 		return s.failure(ip, now)
 	}
+	s.verified.add(stored, password, now)
 	s.lock.succeeded(ip)
 	return nil
 }
