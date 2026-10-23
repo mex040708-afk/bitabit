@@ -13,6 +13,8 @@
 //	BITABIT_MEDIA_KEYS    claves de los enlaces: "kid:clave,…" en base64url
 //	BITABIT_HTTP_ADDR     dónde escucha el HTTP (por defecto 127.0.0.1:8080)
 //	BITABIT_PUBLIC_URL    opcional: con él, «link» imprime la URL completa
+//	BITABIT_PROXY_TRUSTED opcional: redes (CIDR, separadas por comas) de las que se lee la
+//	                      cabecera del protocolo PROXY con la IP real del cliente
 package main
 
 import (
@@ -36,6 +38,7 @@ import (
 	"github.com/mex040708-afk/bitabit/server/internal/auth"
 	"github.com/mex040708-afk/bitabit/server/internal/db"
 	"github.com/mex040708-afk/bitabit/server/internal/ingest"
+	"github.com/mex040708-afk/bitabit/server/internal/proxyproto"
 	"github.com/mex040708-afk/bitabit/server/internal/stream"
 	"github.com/mex040708-afk/bitabit/server/internal/subsonic"
 )
@@ -116,18 +119,19 @@ func serve(log *slog.Logger) error {
 	defer library.Close() // solo lectura: cerrar no puede perder datos
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /media/{file}", stream.NewHandler(signer, lookup(pool), library, log))
+	load := newLoadLimits()
+	mux.Handle("GET /media/{file}", load.mediaHandler(stream.NewHandler(signer, lookup(pool), library, log)))
 	// Un solo servicio de autenticación: el bloqueo por IP se comparte entre /api y /rest.
 	authSvc := auth.NewService(pool)
-	mux.Handle("/rest/", subsonic.New(subsonic.Config{Signer: signer, Library: library, Pool: pool, Auth: authSvc, ServerVersion: serverVersion, Log: log}))
-	mux.Handle("/api/", api.New(api.Config{
+	mux.Handle("/rest/", load.apiHandler(subsonic.New(subsonic.Config{Signer: signer, Library: library, Pool: pool, Auth: authSvc, ServerVersion: serverVersion, Log: log})))
+	mux.Handle("/api/", load.apiHandler(api.New(api.Config{
 		Pool:          pool,
 		Auth:          authSvc,
 		Signer:        signer,
 		Library:       library,
 		ServerVersion: serverVersion,
 		Log:           log,
-	}))
+	})))
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -138,9 +142,20 @@ func serve(log *slog.Logger) error {
 	}
 	// Se escucha antes de arrancar nada, para que un puerto ocupado se vea al
 	// momento.
-	ln, err := net.Listen("tcp", addr)
+	base, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("escuchar en %s: %w", addr, err)
+	}
+	// Con un VPS delante, la IP real del cliente llega en la cabecera PROXY, y solo se
+	// lee de las direcciones de confianza (ADR-040). Sin lista, no cambia nada.
+	trusted, err := proxyproto.ParseTrusted(os.Getenv("BITABIT_PROXY_TRUSTED"))
+	if err != nil {
+		base.Close()
+		return fmt.Errorf("BITABIT_PROXY_TRUSTED: %w", err)
+	}
+	ln := proxyproto.NewListener(base, trusted)
+	if len(trusted) > 0 {
+		log.Info("se lee el protocolo PROXY de las direcciones de confianza", "redes", len(trusted))
 	}
 
 	// Si uno de los dos se cae, se para el otro.

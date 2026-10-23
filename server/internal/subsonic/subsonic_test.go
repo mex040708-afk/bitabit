@@ -20,6 +20,7 @@ import (
 // fakeAuth acepta la clave "bueno" y la contraseña "contraseña correcta".
 type fakeAuth struct {
 	blocked bool
+	busy    bool
 	checks  int
 }
 
@@ -33,6 +34,8 @@ func (f *fakeAuth) Authenticate(_ context.Context, token string) (int64, error) 
 func (f *fakeAuth) CheckPassword(_ context.Context, _ netip.Addr, password string) error {
 	f.checks++
 	switch {
+	case f.busy:
+		return auth.ErrBusy
 	case f.blocked:
 		return &auth.BlockedError{}
 	case password != "contraseña correcta":
@@ -224,5 +227,18 @@ func TestCompatibilityFunctions(t *testing.T) {
 	}
 	if scan := jsonBody(t, get(t, h, http.MethodGet, "/rest/getScanStatus", creds))["scanStatus"].(map[string]any); scan["scanning"] != false {
 		t.Errorf("getScanStatus: %v", scan)
+	}
+}
+
+// Con las comprobaciones de contraseña ocupadas, /rest responde 503 con Retry-After,
+// y no como un error de credenciales (ADR-040).
+func TestBusyPasswordChecksAnswer503WithRetryAfter(t *testing.T) {
+	h := newHandler(&fakeAuth{busy: true})
+	rec := get(t, h, http.MethodGet, "/rest/ping", url.Values{"u": {"x"}, "p": {"lo-que-sea"}, "f": {"json"}})
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "5" {
+		t.Fatalf("HTTP %d, Retry-After %q; want 503 y 5", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	if body := jsonBody(t, rec); body["status"] != "failed" {
+		t.Errorf("cuerpo: %v", body)
 	}
 }
