@@ -165,7 +165,7 @@ func TestGetLicenseAndUnknownFunction(t *testing.T) {
 	if license, _ := body["license"].(map[string]any); license["valid"] != true {
 		t.Errorf("licencia inesperada: %v", body)
 	}
-	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getPlaylists", creds)); got != codeGeneric {
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getPodcasts", creds)); got != codeGeneric {
 		t.Errorf("función sin implementar: error %d, want %d", got, codeGeneric)
 	}
 }
@@ -199,5 +199,30 @@ func TestMethodNotAllowed(t *testing.T) {
 	rec := get(t, newHandler(&fakeAuth{}), http.MethodDelete, "/rest/ping", url.Values{"apiKey": {"bueno"}})
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("DELETE dio %d, want 405", rec.Code)
+	}
+}
+
+// Las funciones de compatibilidad responden lo que corresponde a una cuenta sin
+// listas, favoritos ni géneros, y no necesitan el catálogo.
+func TestCompatibilityFunctions(t *testing.T) {
+	h := newHandler(&fakeAuth{})
+	creds := url.Values{"apiKey": {"bueno"}, "f": {"json"}}
+	if u := jsonBody(t, get(t, h, http.MethodGet, "/rest/getUser", creds))["user"].(map[string]any); u["streamRole"] != true || u["adminRole"] != false {
+		t.Errorf("getUser: %v", u)
+	}
+	for field, fn := range map[string]string{"playlists": "getPlaylists", "starred2": "getStarred2", "genres": "getGenres", "scanStatus": "getScanStatus"} {
+		body := jsonBody(t, get(t, h, http.MethodGet, "/rest/"+fn, creds))
+		if body["status"] != "ok" || body[field] == nil {
+			t.Errorf("%s: %v", fn, body)
+		}
+	}
+	empty := jsonBody(t, get(t, h, http.MethodGet, "/rest/getStarred2", creds))["starred2"].(map[string]any)
+	for _, k := range []string{"artist", "album", "song"} {
+		if list, ok := empty[k].([]any); !ok || len(list) != 0 {
+			t.Errorf("starred2.%s debe ser una lista vacía, no %v", k, empty[k])
+		}
+	}
+	if scan := jsonBody(t, get(t, h, http.MethodGet, "/rest/getScanStatus", creds))["scanStatus"].(map[string]any); scan["scanning"] != false {
+		t.Errorf("getScanStatus: %v", scan)
 	}
 }

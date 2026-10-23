@@ -90,6 +90,11 @@ func New(c Config) http.Handler {
 		{"stream", s.stream, true},
 		{"download", s.download, true},
 		{"scrobble", plain(s.scrobble), true},
+		{"getUser", plain(s.getUser), true},
+		{"getPlaylists", plain(s.getPlaylists), true},
+		{"getStarred2", plain(s.getStarred2), true},
+		{"getGenres", plain(s.getGenres), true},
+		{"getScanStatus", plain(s.getScanStatus), true},
 	}
 	for _, e := range endpoints {
 		mux.HandleFunc("/rest/"+e.name, s.endpoint(e.handle, e.auth))
@@ -234,6 +239,11 @@ type response struct {
 	Album         *albumWithSongs `xml:"album,omitempty" json:"album,omitempty"`
 	Song          *songID3        `xml:"song,omitempty" json:"song,omitempty"`
 	AlbumList2    *albumList      `xml:"albumList2,omitempty" json:"albumList2,omitempty"`
+	User          *user           `xml:"user,omitempty" json:"user,omitempty"`
+	Playlists     *playlists      `xml:"playlists,omitempty" json:"playlists,omitempty"`
+	Starred2      *starred2       `xml:"starred2,omitempty" json:"starred2,omitempty"`
+	Genres        *genres         `xml:"genres,omitempty" json:"genres,omitempty"`
+	ScanStatus    *scanStatus     `xml:"scanStatus,omitempty" json:"scanStatus,omitempty"`
 	SearchResult3 *searchResult3  `xml:"searchResult3,omitempty" json:"searchResult3,omitempty"`
 }
 

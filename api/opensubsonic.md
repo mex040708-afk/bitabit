@@ -43,3 +43,8 @@ Usa siempre HTTPS fuera de casa: con `u` y `p` la contraseña viaja en cada peti
 | `stream` | sí | 3 | hecha: responde **302** a un enlace firmado de `/media` (el audio lo sirve `/media`, con `Range`). Sin `maxBitRate` o con `format=raw`, el original; con `maxBitRate` por debajo de la tasa del original y AAC 256 disponible, el AAC. Nada se convierte al vuelo |
 | `download` | sí | 3 | hecha: igual, siempre el original |
 | `scrobble` | sí | 3 | hecha: no guarda nada (no hay historial) |
+| `getUser` | sí | 4 | hecha: la cuenta única puede escuchar, descargar y pedir carátulas; ningún otro permiso |
+| `getPlaylists`, `getStarred2`, `getGenres` | sí | 4 | hechas: siempre vacías (no hay listas, favoritos ni géneros) |
+| `getScanStatus` | sí | 4 | hecha: nunca hay un escaneo en curso (importa `entrada/`) |
+
+La tanda 4 son funciones que muchos clientes llaman al arrancar y se niegan a seguir si fallan; no se han probado con un cliente concreto.
