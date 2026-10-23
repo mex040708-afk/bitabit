@@ -557,3 +557,62 @@ func TestRecoverDoesNotDeleteWhenTheDatabaseLooksWrong(t *testing.T) {
 		t.Error("una sola carátula sin dueño y vieja, con la base en orden, debía borrarse")
 	}
 }
+
+// Una fuente que pasa del tope (4 GiB con la biblioteca vacía) va a fallidos/ con su
+// nota, sin leerse: es un archivo disperso, así que leerlo entero costaría segundos.
+func TestImportSendsAFileOverTheLimitToFailedWithItsNote(t *testing.T) {
+	e := newImportEnv(t)
+	big := e.path("entrada", "enorme.flac")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(5 << 30); err != nil {
+		f.Close()
+		t.Skipf("no se puede crear un archivo disperso de 5 GiB aquí: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	res, err := e.im.Import(context.Background(), "enorme.flac")
+	if err != nil || res.Outcome != ingest.Failed || !strings.Contains(res.Reason, "máximo") {
+		t.Fatalf("Import = %+v, %v; want Failed por el tope", res, err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("tardó %v: parece que se leyó entero", took)
+	}
+	if exists(t, big) {
+		t.Error("el archivo sigue en entrada/")
+	}
+	if !exists(t, e.path("fallidos", "enorme.flac")) || !exists(t, e.path("fallidos", "enorme.flac.error.txt")) {
+		t.Error("faltan el archivo o su nota en fallidos/")
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+}
+
+// Cambiar una carpeta de entrada/ por un enlace a otra de la carpeta de datos (como
+// biblioteca/orig) no deja leer ni borrar nada de ahí: el Root de entrada/ lo corta.
+func TestImportDoesNotFollowADirectorySymlinkToTheLibrary(t *testing.T) {
+	e := newImportEnv(t)
+	victim := e.path("biblioteca", "orig", "999.flac")
+	if err := os.WriteFile(victim, []byte("un original de la biblioteca"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(e.path("biblioteca", "orig"), e.path("entrada", "atajo")); err != nil {
+		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
+	}
+	res, err := e.im.Import(context.Background(), "atajo/999.flac")
+	if err == nil && res.Outcome == ingest.Imported {
+		t.Fatalf("Import importó algo a través del enlace: %+v", res)
+	}
+	if got := readFile(t, victim); string(got) != "un original de la biblioteca" {
+		t.Error("el original de la biblioteca cambió")
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+}

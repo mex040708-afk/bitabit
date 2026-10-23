@@ -17,7 +17,7 @@ func TestCopySourceDoesNotBlockOnAFIFO(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := im.copySource("tuberia.flac", work)
+		_, _, err := im.copySource("tuberia.flac", work, testLimit)
 		done <- err
 	}()
 	select {

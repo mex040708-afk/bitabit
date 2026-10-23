@@ -28,7 +28,16 @@ func newCopyEnv(t *testing.T) (im *Importer, dataDir, work string) {
 			t.Error(err)
 		}
 	})
-	return &Importer{data: root}, dataDir, work
+	inbox, err := root.OpenRoot("entrada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := inbox.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return &Importer{data: root, inboxRoot: inbox}, dataDir, work
 }
 
 func TestCopySourceCopiesAndHashesTheSameBytes(t *testing.T) {
@@ -37,7 +46,7 @@ func TestCopySourceCopiesAndHashesTheSameBytes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "entrada", "a.FLAC"), content, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	copied, sum, err := im.copySource("a.FLAC", work)
+	copied, sum, err := im.copySource("a.FLAC", work, testLimit)
 	if err != nil {
 		t.Fatalf("copySource: %v", err)
 	}
@@ -57,7 +66,7 @@ func TestCopySourceCopiesAndHashesTheSameBytes(t *testing.T) {
 // sistema que se reintenta: no se manda a fallidos/.
 func TestCopySourceMissingFileIsASystemError(t *testing.T) {
 	im, _, work := newCopyEnv(t)
-	_, _, err := im.copySource("no-existe.flac", work)
+	_, _, err := im.copySource("no-existe.flac", work, testLimit)
 	var unsafe *unsafeSourceError
 	if err == nil || errors.As(err, &unsafe) || !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("copySource = %v, want un error de sistema con ErrNotExist", err)
@@ -75,7 +84,7 @@ func TestCopySourceSymlinkOutIsUnsafe(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "entrada", "enlace.flac")); err != nil {
 		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
 	}
-	_, _, err := im.copySource("enlace.flac", work)
+	_, _, err := im.copySource("enlace.flac", work, testLimit)
 	var unsafe *unsafeSourceError
 	if !errors.As(err, &unsafe) {
 		t.Fatalf("copySource = %v, want unsafeSourceError", err)
@@ -131,5 +140,38 @@ func TestCheckUnchanged(t *testing.T) {
 	}
 	if err := checkUnchanged(before, touched, 5); err == nil {
 		t.Error("un archivo con otra fecha de modificación no da error")
+	}
+}
+
+// testLimit es un tope que ningún test alcanza.
+const testLimit = 1 << 40
+
+func TestCopySourceRefusesAFileOverTheLimitWithoutCopyingIt(t *testing.T) {
+	im, dir, work := newCopyEnv(t)
+	if err := os.WriteFile(filepath.Join(dir, "entrada", "grande.flac"), make([]byte, 10<<10), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := im.copySource("grande.flac", work, 1<<10)
+	var tooBig *tooBigError
+	if !errors.As(err, &tooBig) {
+		t.Fatalf("copySource = %v, want tooBigError", err)
+	}
+	if entries, _ := os.ReadDir(work); len(entries) != 0 {
+		t.Errorf("no debía copiarse nada, pero la carpeta de trabajo tiene %d archivos", len(entries))
+	}
+}
+
+func TestClampSourceLimit(t *testing.T) {
+	const gib = 1 << 30
+	for largest, want := range map[int64]int64{
+		0:         4 * gib, // biblioteca vacía
+		200 << 20: 4 * gib, // el doble de 200 MiB no llega al mínimo
+		3 * gib:   6 * gib, // el doble
+		4 * gib:   8 * gib,
+		10 * gib:  8 * gib, // el máximo
+	} {
+		if got := clampSourceLimit(largest); got != want {
+			t.Errorf("clampSourceLimit(%d) = %d, want %d", largest, got, want)
+		}
 	}
 }

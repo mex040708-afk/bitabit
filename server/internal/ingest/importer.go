@@ -80,14 +80,15 @@ type Result struct {
 // a fallidos/ si no valen. Importa de uno en uno: no admite llamadas
 // simultáneas.
 type Importer struct {
-	inbox   string
-	library string
-	failed  string
-	dataDir string
-	data    *os.Root // la carpeta de datos: de aquí sale todo acceso a entrada/ (ADR-032)
-	pool    *pgxpool.Pool
-	log     *slog.Logger
-	now     func() time.Time // los tests lo mueven para no esperar 24 horas
+	inbox     string
+	library   string
+	failed    string
+	dataDir   string
+	inboxRoot *os.Root // entrada/ aparte: seguir un enlace simbólico no puede salir de ella ni llegar a biblioteca/ (ADR-032)
+	data      *os.Root // la carpeta de datos: de aquí sale todo acceso a entrada/ (ADR-032)
+	pool      *pgxpool.Pool
+	log       *slog.Logger
+	now       func() time.Time // los tests lo mueven para no esperar 24 horas
 }
 
 // NewImporter prepara la importación en dataDir, que debe tener entrada/,
@@ -121,6 +122,12 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 		return nil, fmt.Errorf("importación: %w", err)
 	}
 	im.data = data
+	inboxRoot, err := data.OpenRoot("entrada")
+	if err != nil {
+		data.Close()
+		return nil, fmt.Errorf("importación: %w", err)
+	}
+	im.inboxRoot = inboxRoot
 	for _, dir := range []string{im.versionDir(db.QualityOriginal), im.versionDir(db.QualityAAC256), im.coverDir()} {
 		if err := im.mkdirAll(dir); err != nil {
 			return nil, fmt.Errorf("importación: crear %s: %w", dir, err)
@@ -131,18 +138,15 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 
 // Close suelta la carpeta de datos abierta. Solo lee de ella al cerrar, así que
 // no puede perder datos.
-func (im *Importer) Close() error { return im.data.Close() }
+func (im *Importer) Close() error {
+	return errors.Join(im.inboxRoot.Close(), im.data.Close())
+}
 
 // Run importa lo que esté listo en la entrada cada interval, hasta que se
 // cancele ctx. Los fallos del sistema se registran y el archivo se reintenta en
 // la siguiente pasada.
 func (im *Importer) Run(ctx context.Context, interval, quiet time.Duration) error {
-	inboxRoot, err := im.data.OpenRoot("entrada")
-	if err != nil {
-		return fmt.Errorf("abrir la entrada: %w", err)
-	}
-	defer inboxRoot.Close() // solo lectura: cerrar no puede perder datos
-	inbox := NewInboxFS(inboxRoot.FS(), quiet)
+	inbox := NewInboxFS(im.inboxRoot.FS(), quiet)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -184,7 +188,6 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	if !filepath.IsLocal(filepath.FromSlash(rel)) {
 		return Result{}, fmt.Errorf("importar: ruta fuera de la entrada: %q", rel)
 	}
-	src := filepath.Join(im.inbox, filepath.FromSlash(rel))
 
 	work, err := os.MkdirTemp(im.library, workDirPrefix)
 	if err != nil {
@@ -200,10 +203,18 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	// trabajo calculando su hash: la sonda, las versiones y la carátula leen esos
 	// mismos bytes, y ningún proceso externo recibe un nombre de entrada/ que
 	// alguien pueda cambiar por un enlace simbólico (ADR-032).
-	copied, sum, err := im.copySource(rel, work)
+	limit, err := im.sourceLimit(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
+	}
+	copied, sum, err := im.copySource(rel, work, limit)
 	var unsafe *unsafeSourceError
-	if errors.As(err, &unsafe) {
-		return im.fail(rel, src, Failed, 0, unsafe.Error())
+	var tooBig *tooBigError
+	switch {
+	case errors.As(err, &tooBig):
+		return im.failTooBig(rel, tooBig)
+	case errors.As(err, &unsafe):
+		return im.failUnsafe(rel, unsafe.Error())
 	}
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
@@ -213,12 +224,12 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
 	if found {
-		return im.fail(rel, src, Duplicate, id, fmt.Sprintf("ya importado como pista %d", id))
+		return im.failCopied(rel, copied, Duplicate, id, fmt.Sprintf("ya importado como pista %d", id))
 	}
 
 	info, err := Probe(ctx, copied)
 	if errors.Is(err, ErrUnreadable) {
-		return im.fail(rel, src, Failed, 0, err.Error())
+		return im.failCopied(rel, copied, Failed, 0, err.Error())
 	}
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
@@ -226,7 +237,7 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 
 	v, err := BuildVersions(ctx, copied, info, work)
 	if errors.Is(err, ErrUnreadable) {
-		return im.fail(rel, src, Failed, 0, err.Error())
+		return im.failCopied(rel, copied, Failed, 0, err.Error())
 	}
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
@@ -243,11 +254,7 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	}
 	// La pista ya está guardada. Si no se puede borrar la fuente, en la próxima
 	// pasada saldrá como repetida y acabará en fallidos/.
-	if err := im.remove(src); err != nil {
-		im.log.Error("importado, pero no se pudo borrar de la entrada", "archivo", rel, "pista", id, "error", err)
-	} else {
-		im.removeEmptyDirs(filepath.Dir(src))
-	}
+	im.removeSource(rel, id)
 	return Result{Outcome: Imported, TrackID: id}, nil
 }
 
@@ -395,7 +402,7 @@ func newTrack(rel string, sum [32]byte, info Info) db.NewTrack {
 
 // fail mueve la fuente a fallidos/ con la misma ruta relativa y deja al lado una
 // nota con el motivo.
-func (im *Importer) fail(rel, src string, outcome Outcome, id int64, reason string) (Result, error) {
+func (im *Importer) failCopied(rel, copied string, outcome Outcome, id int64, reason string) (Result, error) {
 	dst, err := im.failedPath(rel)
 	if err != nil {
 		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
@@ -403,17 +410,83 @@ func (im *Importer) fail(rel, src string, outcome Outcome, id int64, reason stri
 	if err := im.mkdirAll(filepath.Dir(dst)); err != nil {
 		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
 	}
-	if err := im.rename(src, dst); err != nil {
+	// Lo que va a fallidos/ es la copia que se leyó y se hasheó, no el nombre de
+	// entrada/, que alguien pudo cambiar mientras tanto; de entrada/ solo se borra.
+	if err := im.rename(copied, dst); err != nil {
 		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
 	}
+	im.writeFailureNote(rel, dst, reason)
+	im.removeSource(rel, 0)
+	return Result{Outcome: outcome, TrackID: id, Reason: reason}, nil
+}
+
+// failTooBig manda a fallidos/ un archivo que pasa del tope sin leerlo: no hay copia
+// que mover, así que se renombra el propio archivo. Antes se comprueba por el Root de
+// entrada/ que es un archivo regular de verdad; entre esa comprobación y el
+// renombrado queda una ventana mínima en la que alguien con escritura en entrada/
+// podría cambiarlo por un enlace dentro de la carpeta de datos. Lo peor que pasa es
+// que se mueva a fallidos/ un archivo de la biblioteca: no se borra ni se lee nada.
+func (im *Importer) failTooBig(rel string, tb *tooBigError) (Result, error) {
+	reason := tb.Error()
+	info, err := im.inboxRoot.Lstat(filepath.FromSlash(rel))
+	if err != nil || !info.Mode().IsRegular() {
+		return im.failUnsafe(rel, reason)
+	}
+	dst, err := im.failedPath(rel)
+	if err != nil {
+		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
+	}
+	if err := im.mkdirAll(filepath.Dir(dst)); err != nil {
+		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
+	}
+	if err := im.rename(filepath.Join(im.inbox, filepath.FromSlash(rel)), dst); err != nil {
+		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
+	}
+	im.writeFailureNote(rel, dst, reason)
+	im.removeEmptyDirs(path.Dir(rel))
+	return Result{Outcome: Failed, Reason: reason}, nil
+}
+
+// failUnsafe registra un archivo que no se puede abrir con seguridad: no se lee ni se
+// mueve. Si es un enlace simbólico se borra el propio enlace (nunca su destino) para
+// que no se vuelva a intentar; cualquier otra cosa se deja donde está.
+func (im *Importer) failUnsafe(rel, reason string) (Result, error) {
+	dst, err := im.failedPath(rel)
+	if err != nil {
+		return Result{}, fmt.Errorf("registrar %s en fallidos/: %w", rel, err)
+	}
+	if err := im.mkdirAll(filepath.Dir(dst)); err != nil {
+		return Result{}, fmt.Errorf("registrar %s en fallidos/: %w", rel, err)
+	}
+	im.writeFailureNote(rel, dst, reason)
+	if info, err := im.inboxRoot.Lstat(filepath.FromSlash(rel)); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		if err := im.inboxRoot.Remove(filepath.FromSlash(rel)); err != nil {
+			im.log.Error("no se pudo borrar el enlace de la entrada", "archivo", rel, "error", err)
+		}
+		im.removeEmptyDirs(path.Dir(rel))
+	}
+	return Result{Outcome: Failed, Reason: reason}, nil
+}
+
+// writeFailureNote deja junto a dst la nota con el motivo.
+func (im *Importer) writeFailureNote(rel, dst, reason string) {
 	note := fmt.Sprintf("Archivo: %s\nFecha: %s\nMotivo: %s\n", rel, time.Now().Format(time.RFC3339), reason)
-	// El archivo ya está en fallidos/: sin la nota se ve igual, así que basta
-	// con registrarlo.
+	// El archivo ya está en fallidos/: sin la nota se ve igual, así que basta con
+	// registrarlo.
 	if err := im.writeFile(dst+errorNoteExt, []byte(note)); err != nil {
 		im.log.Error("no se pudo escribir la nota del fallo", "archivo", dst, "error", err)
 	}
-	im.removeEmptyDirs(filepath.Dir(src))
-	return Result{Outcome: outcome, TrackID: id, Reason: reason}, nil
+}
+
+// removeSource borra la fuente de entrada/ por su Root, y las carpetas que queden
+// vacías. Si no se puede, en la próxima pasada saldrá como repetida y acabará en
+// fallidos/.
+func (im *Importer) removeSource(rel string, track int64) {
+	if err := im.inboxRoot.Remove(filepath.FromSlash(rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		im.log.Error("no se pudo borrar de la entrada", "archivo", rel, "pista", track, "error", err)
+		return
+	}
+	im.removeEmptyDirs(path.Dir(rel))
 }
 
 // failedPath busca en fallidos/ un nombre libre para rel, sin pisar ni el
@@ -454,20 +527,26 @@ func (im *Importer) notExists(paths ...string) (bool, error) {
 // removeEmptyDirs borra dir y sus padres mientras estén vacíos, sin llegar a
 // borrar entrada/. Lo que no es audio se queda, y con ello su carpeta.
 func (im *Importer) removeEmptyDirs(dir string) {
-	for dir != im.inbox && strings.HasPrefix(dir, im.inbox+string(filepath.Separator)) {
-		entries, err := im.readDir(dir)
+	for dir != "." && dir != "" && dir != "/" {
+		f, err := im.inboxRoot.Open(filepath.FromSlash(dir))
 		if err != nil {
+			im.log.Error("no se pudo mirar una carpeta de la entrada", "carpeta", dir, "error", err)
+			return
+		}
+		entries, err := f.ReadDir(1)
+		f.Close() // solo lectura: cerrar no puede perder datos
+		if err != nil && !errors.Is(err, io.EOF) {
 			im.log.Error("no se pudo mirar una carpeta de la entrada", "carpeta", dir, "error", err)
 			return
 		}
 		if len(entries) > 0 {
 			return
 		}
-		if err := im.remove(dir); err != nil {
+		if err := im.inboxRoot.Remove(filepath.FromSlash(dir)); err != nil {
 			im.log.Error("no se pudo borrar una carpeta vacía de la entrada", "carpeta", dir, "error", err)
 			return
 		}
-		dir = filepath.Dir(dir)
+		dir = path.Dir(dir)
 	}
 }
 
@@ -745,11 +824,11 @@ func (e *unsafeSourceError) Error() string { return e.reason }
 // la ruta de la copia y el SHA-256 de lo copiado. Un archivo que ya no está es un
 // error de sistema (se reintenta); uno que no se puede abrir con seguridad es un
 // unsafeSourceError.
-func (im *Importer) copySource(rel, work string) (copied string, sum [32]byte, err error) {
+func (im *Importer) copySource(rel, work string, limit int64) (copied string, sum [32]byte, err error) {
 	// O_NONBLOCK: si entre el listado y la apertura alguien cambia el archivo por una
 	// tubería con nombre, abrirla sin él se quedaría esperando a un escritor para
 	// siempre y pararía la importación. Con él se abre y el Stat la rechaza.
-	f, err := im.data.OpenFile(path.Join("entrada", rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, err := im.inboxRoot.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil && isUnsafePath(err) {
 		return "", sum, &unsafeSourceError{reason: "no se puede abrir de forma segura: " + err.Error()}
 	}
@@ -767,18 +846,25 @@ func (im *Importer) copySource(rel, work string) (copied string, sum [32]byte, e
 	if !info.Mode().IsRegular() {
 		return "", sum, &unsafeSourceError{reason: "no es un archivo regular"}
 	}
+	if info.Size() > limit {
+		return "", sum, &tooBigError{size: info.Size(), limit: limit}
+	}
 	copied = filepath.Join(work, "copia-de-la-fuente"+strings.ToLower(path.Ext(rel)))
 	out, err := os.OpenFile(copied, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
 	if err != nil {
 		return "", sum, fmt.Errorf("crear la copia de trabajo: %w", err)
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(out, h), f)
+	// Un archivo que crece mientras se copia no pasa del tope: se corta.
+	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(f, limit+1))
 	if err != nil {
 		return "", sum, errors.Join(fmt.Errorf("copiar %s: %w", rel, err), out.Close())
 	}
 	if err := out.Close(); err != nil {
 		return "", sum, fmt.Errorf("cerrar la copia de trabajo: %w", err)
+	}
+	if n > limit {
+		return "", sum, &tooBigError{size: n, limit: limit}
 	}
 	// Si alguien seguía escribiendo el archivo mientras se copiaba, la copia es una
 	// foto a medias: se descarta y se reintenta cuando la vigilancia lo vea quieto.
@@ -903,4 +989,34 @@ func (im *Importer) readDir(abs string) ([]fs.DirEntry, error) {
 	}
 	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	return entries, nil
+}
+
+// Tope de tamaño de una fuente (decisión del desarrollador, 2026-10-23): el doble del
+// mayor original de la biblioteca, entre 4 y 8 GiB. Con la biblioteca vacía, 4 GiB.
+const (
+	minSourceLimit = 4 << 30
+	maxSourceLimit = 8 << 30
+)
+
+// tooBigError es una fuente que pasa del tope de tamaño.
+type tooBigError struct{ size, limit int64 }
+
+func (e *tooBigError) Error() string {
+	return fmt.Sprintf("el archivo pesa más de %d MiB, el máximo es %d MiB", e.size>>20, e.limit>>20)
+}
+
+// sourceLimit calcula el tope de tamaño de una fuente ahora.
+func (im *Importer) sourceLimit(ctx context.Context) (int64, error) {
+	largest, err := db.MaxOriginalBytes(ctx, im.pool)
+	if err != nil {
+		return 0, err
+	}
+	return clampSourceLimit(largest), nil
+}
+
+func clampSourceLimit(largestOriginal int64) int64 {
+	if largestOriginal > maxSourceLimit/2 {
+		return maxSourceLimit
+	}
+	return max(minSourceLimit, 2*largestOriginal)
 }
