@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mex040708-afk/bitabit/server/internal/db"
+	"github.com/mex040708-afk/bitabit/server/internal/library"
 )
 
 const (
@@ -21,6 +22,11 @@ const (
 	// trata como ilegible (ADR-015), y el plazo acota a ffmpeg como a los demás.
 	coverTimeout  = 30 * time.Second
 	maxCoverBytes = 32 << 20
+	// maxThumbPixels es lo más que se decodifica para la miniatura. Los bytes de la
+	// carátula no acotan la memoria de ffmpeg: una PNG de 30000x30000 de un solo
+	// color cabe en pocos MB y al decodificarla pide varios GB. Pasado esto no hay
+	// miniatura y se sirve el original (ADR-017); 8192x8192 cabe.
+	maxThumbPixels = 64 << 20
 )
 
 var (
@@ -29,17 +35,19 @@ var (
 )
 
 // Cover es una carátula ya sacada de la fuente. Path es su archivo en la carpeta
-// de trabajo y Ext su formato, jpg o png. Con Path vacío no hay carátula.
+// de trabajo y Ext su formato, jpg o png. Con Path vacío no hay carátula. Thumb es
+// la miniatura (ADR-017), también en la carpeta de trabajo, o vacío si no hay.
 type Cover struct {
-	Path string
-	Ext  string
+	Path  string
+	Ext   string
+	Thumb string
 }
 
 // stageCover deja la carátula de src en la carpeta de trabajo, lista para
 // colocarla con el ID del álbum. Es opcional: si la imagen no vale, se avisa y la
 // pista se importa sin ella. Los errores del sistema sí paran la importación.
 func (im *Importer) stageCover(ctx context.Context, rel, src, work string) (Cover, error) {
-	img, ext, err := readCover(ctx, src)
+	img, ext, pic, err := readCover(ctx, src)
 	if errors.Is(err, ErrUnreadable) {
 		im.log.Warn("pista sin carátula: la imagen no se puede usar", "archivo", rel, "motivo", err)
 		return Cover{}, nil
@@ -54,7 +62,38 @@ func (im *Importer) stageCover(ctx context.Context, rel, src, work string) (Cove
 	if err := os.WriteFile(path, img, filePerm); err != nil {
 		return Cover{}, fmt.Errorf("guardar la carátula en la carpeta de trabajo: %w", err)
 	}
-	return Cover{Path: path, Ext: ext}, nil
+	return Cover{Path: path, Ext: ext, Thumb: im.stageThumb(ctx, rel, src, pic, len(img), work)}, nil
+}
+
+// stageThumb genera la miniatura de la carátula y devuelve su archivo en la
+// carpeta de trabajo, o "" si no hace falta o no se pudo. Es opcional como la
+// carátula: un fallo se avisa y la pista se importa sin ella. Los errores del
+// sistema también, porque la miniatura no justifica reintentar la pista.
+func (im *Importer) stageThumb(ctx context.Context, rel, src string, pic pictureStream, coverSize int, work string) string {
+	if !pic.fitsThumb() {
+		im.log.Warn("carátula sin miniatura: la imagen es demasiado grande o no se sabe su tamaño",
+			"archivo", rel, "ancho", pic.Width, "alto", pic.Height)
+		return ""
+	}
+	thumb, err := runTool(ctx, coverTimeout, maxCoverBytes, "ffmpeg", thumbArgs(src, pic.Index)...)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ""
+		}
+		im.log.Warn("carátula sin miniatura", "archivo", rel, "motivo", err)
+		return ""
+	}
+	// Una carátula que ya cabe en 256 px sale casi igual de grande al recodificarla:
+	// entonces se sirve el original (ADR-017).
+	if len(thumb) == 0 || len(thumb) >= coverSize {
+		return ""
+	}
+	path := filepath.Join(work, "thumb.jpg")
+	if err := os.WriteFile(path, thumb, filePerm); err != nil {
+		im.log.Warn("carátula sin miniatura: no se pudo guardar", "archivo", rel, "motivo", err)
+		return ""
+	}
+	return path
 }
 
 // placeCover coloca la carátula como carátula del álbum de la pista, si el álbum
@@ -72,7 +111,11 @@ func (im *Importer) placeCover(ctx context.Context, tx pgx.Tx, trackID int64, c 
 	if hasCover {
 		return placed, nil
 	}
-	moved, err := placeAll([][2]string{{c.Path, im.coverPath(albumID, c.Ext)}})
+	moves := [][2]string{{c.Path, im.coverPath(albumID, c.Ext)}}
+	if c.Thumb != "" {
+		moves = append(moves, [2]string{c.Thumb, im.thumbPath(albumID)})
+	}
+	moved, err := placeAll(moves)
 	placed = append(placed, moved...)
 	if err != nil {
 		return placed, err
@@ -82,38 +125,53 @@ func (im *Importer) placeCover(ctx context.Context, tx pgx.Tx, trackID int64, c 
 
 // readCover saca de file la primera imagen incrustada que sea JPEG o PNG (ADR-015),
 // tal cual, y devuelve sus bytes y su extensión. Sin imágenes, devuelve nil y una
-// extensión vacía, sin error. Si hay imágenes pero ninguna sirve, el error envuelve
-// ErrUnreadable.
-func readCover(ctx context.Context, file string) ([]byte, string, error) {
+// extensión vacía, sin error. Devuelve también el stream elegido. Si hay imágenes
+// pero ninguna sirve, el error envuelve ErrUnreadable.
+func readCover(ctx context.Context, file string) ([]byte, string, pictureStream, error) {
 	streams, err := pictureStreams(ctx, file)
 	if err != nil || len(streams) == 0 {
-		return nil, "", err
+		return nil, "", pictureStream{}, err
 	}
 	var reason error
-	for _, index := range streams {
-		img, err := runTool(ctx, coverTimeout, maxCoverBytes, "ffmpeg", coverArgs(file, index)...)
+	for _, pic := range streams {
+		img, err := runTool(ctx, coverTimeout, maxCoverBytes, "ffmpeg", coverArgs(file, pic.Index)...)
 		if errors.Is(err, ErrUnreadable) {
 			reason = err
 			continue
 		}
 		if err != nil {
-			return nil, "", err
+			return nil, "", pictureStream{}, err
 		}
 		if ext := imageExt(img); ext != "" {
-			return img, ext, nil
+			return img, ext, pic, nil
 		}
 		reason = fmt.Errorf("%w: la imagen incrustada no es JPEG ni PNG", ErrUnreadable)
 	}
-	return nil, "", reason
+	return nil, "", pictureStream{}, reason
 }
 
-// pictureStreams devuelve los índices de los streams que ffprobe marca como imagen
-// incrustada (attached_pic). Un vídeo de verdad no cuenta.
-func pictureStreams(ctx context.Context, file string) ([]int, error) {
+// pictureStream es una imagen incrustada: su índice de stream y su tamaño en
+// píxeles según ffprobe (0 si no lo dice).
+type pictureStream struct {
+	Index, Width, Height int
+}
+
+// fitsThumb dice si la imagen se puede decodificar para la miniatura sin pedirle
+// a ffmpeg más memoria de la razonable. Sin tamaño conocido, no.
+func (p pictureStream) fitsThumb() bool {
+	if p.Width <= 0 || p.Height <= 0 {
+		return false
+	}
+	return int64(p.Width)*int64(p.Height) <= maxThumbPixels
+}
+
+// pictureStreams devuelve los streams que ffprobe marca como imagen incrustada
+// (attached_pic), con su tamaño. Un vídeo de verdad no cuenta.
+func pictureStreams(ctx context.Context, file string) ([]pictureStream, error) {
 	args := []string{
 		"-v", "error",
 		"-select_streams", "v",
-		"-show_entries", "stream=index:stream_disposition=attached_pic",
+		"-show_entries", "stream=index,width,height:stream_disposition=attached_pic",
 		"-of", "json",
 	}
 	out, err := runTool(ctx, probeTimeout, maxProbeOutput, "ffprobe", append(args, ffmpegInput(file)...)...)
@@ -123,6 +181,8 @@ func pictureStreams(ctx context.Context, file string) ([]int, error) {
 	var parsed struct {
 		Streams []struct {
 			Index       int `json:"index"`
+			Width       int `json:"width"`
+			Height      int `json:"height"`
 			Disposition struct {
 				AttachedPic int `json:"attached_pic"`
 			} `json:"disposition"`
@@ -131,13 +191,13 @@ func pictureStreams(ctx context.Context, file string) ([]int, error) {
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("%w: salida de ffprobe ilegible: %w", ErrUnreadable, err)
 	}
-	var index []int
+	var pics []pictureStream
 	for _, s := range parsed.Streams {
 		if s.Disposition.AttachedPic == 1 {
-			index = append(index, s.Index)
+			pics = append(pics, pictureStream{Index: s.Index, Width: s.Width, Height: s.Height})
 		}
 	}
-	return index, nil
+	return pics, nil
 }
 
 // coverArgs son los argumentos de ffmpeg que escriben el stream index de file en la
@@ -146,6 +206,17 @@ func coverArgs(file string, index int) []string {
 	args := []string{"-v", "error", "-nostdin"}
 	args = append(args, ffmpegInput(file)...)
 	return append(args, "-map", "0:"+strconv.Itoa(index), "-c", "copy", "-f", "image2pipe", "pipe:1")
+}
+
+// thumbArgs son los argumentos de ffmpeg que escriben el stream index de file como
+// JPEG de ThumbSize px en su lado largo, sin ampliar y sin metadatos (ADR-017).
+func thumbArgs(file string, index int) []string {
+	size := strconv.Itoa(library.ThumbSize)
+	filter := "scale=w='if(gt(iw,ih),min(" + size + ",iw),-2)':h='if(gt(iw,ih),-2,min(" + size + ",ih))':flags=lanczos,format=yuvj420p"
+	args := []string{"-v", "error", "-nostdin"}
+	args = append(args, ffmpegInput(file)...)
+	return append(args, "-map", "0:"+strconv.Itoa(index), "-vf", filter,
+		"-frames:v", "1", "-c:v", "mjpeg", "-q:v", "3", "-map_metadata", "-1", "-f", "image2pipe", "pipe:1")
 }
 
 // imageExt dice la extensión de data si es JPEG o PNG, mirando sus primeros bytes.
