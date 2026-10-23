@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/mex040708-afk/bitabit/server/internal/auth"
 )
 
@@ -45,12 +47,14 @@ type Authenticator interface {
 
 // Config son las dependencias de la capa.
 type Config struct {
+	Pool          *pgxpool.Pool // el catálogo; sin él solo funcionan las funciones sin datos
 	Auth          Authenticator
 	ServerVersion string
 	Log           *slog.Logger
 }
 
 type server struct {
+	pool    *pgxpool.Pool
 	auth    Authenticator
 	version string
 	log     *slog.Logger
@@ -58,7 +62,7 @@ type server struct {
 
 // New devuelve el manejador de /rest/. Se monta con mux.Handle("/rest/", …).
 func New(c Config) http.Handler {
-	s := &server{auth: c.Auth, version: c.ServerVersion, log: c.Log}
+	s := &server{pool: c.Pool, auth: c.Auth, version: c.ServerVersion, log: c.Log}
 	mux := http.NewServeMux()
 	endpoints := []struct {
 		name   string
@@ -69,6 +73,9 @@ func New(c Config) http.Handler {
 		{"getLicense", s.getLicense, true},
 		// Sin autenticación, como dice la especificación.
 		{"getOpenSubsonicExtensions", s.getExtensions, false},
+		{"getMusicFolders", s.getMusicFolders, true},
+		{"getArtists", s.getArtists, true},
+		{"getArtist", s.getArtist, true},
 	}
 	for _, e := range endpoints {
 		mux.HandleFunc("/rest/"+e.name, s.endpoint(e.handle, e.auth))
@@ -189,16 +196,19 @@ func (s *server) getExtensions(*http.Request) *response {
 // response es la respuesta de cualquier función: los mismos campos salen en JSON,
 // dentro de "subsonic-response", y en XML.
 type response struct {
-	XMLName       xml.Name    `xml:"subsonic-response" json:"-"`
-	Xmlns         string      `xml:"xmlns,attr" json:"-"`
-	Status        string      `xml:"status,attr" json:"status"`
-	Version       string      `xml:"version,attr" json:"version"`
-	Type          string      `xml:"type,attr" json:"type"`
-	ServerVersion string      `xml:"serverVersion,attr" json:"serverVersion"`
-	OpenSubsonic  bool        `xml:"openSubsonic,attr" json:"openSubsonic"`
-	Error         *apiError   `xml:"error,omitempty" json:"error,omitempty"`
-	License       *license    `xml:"license,omitempty" json:"license,omitempty"`
-	Extensions    []extension `xml:"openSubsonicExtensions,omitempty" json:"openSubsonicExtensions,omitempty"`
+	XMLName       xml.Name      `xml:"subsonic-response" json:"-"`
+	Xmlns         string        `xml:"xmlns,attr" json:"-"`
+	Status        string        `xml:"status,attr" json:"status"`
+	Version       string        `xml:"version,attr" json:"version"`
+	Type          string        `xml:"type,attr" json:"type"`
+	ServerVersion string        `xml:"serverVersion,attr" json:"serverVersion"`
+	OpenSubsonic  bool          `xml:"openSubsonic,attr" json:"openSubsonic"`
+	Error         *apiError     `xml:"error,omitempty" json:"error,omitempty"`
+	License       *license      `xml:"license,omitempty" json:"license,omitempty"`
+	Extensions    []extension   `xml:"openSubsonicExtensions,omitempty" json:"openSubsonicExtensions,omitempty"`
+	MusicFolders  *musicFolders `xml:"musicFolders,omitempty" json:"musicFolders,omitempty"`
+	Artists       *artistsID3   `xml:"artists,omitempty" json:"artists,omitempty"`
+	Artist        *artistID3    `xml:"artist,omitempty" json:"artist,omitempty"`
 }
 
 type apiError struct {

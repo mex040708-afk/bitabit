@@ -56,8 +56,10 @@ func get(t *testing.T, h http.Handler, method, path string, form url.Values) *ht
 	return rec
 }
 
+func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
 func newHandler(f *fakeAuth) http.Handler {
-	return New(Config{Auth: f, ServerVersion: "prueba", Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	return New(Config{Auth: f, ServerVersion: "prueba", Log: quietLog()})
 }
 
 // jsonBody lee el contenido de "subsonic-response".
@@ -163,7 +165,7 @@ func TestGetLicenseAndUnknownFunction(t *testing.T) {
 	if license, _ := body["license"].(map[string]any); license["valid"] != true {
 		t.Errorf("licencia inesperada: %v", body)
 	}
-	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getArtists", creds)); got != codeGeneric {
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/getSong", creds)); got != codeGeneric {
 		t.Errorf("función sin implementar: error %d, want %d", got, codeGeneric)
 	}
 }

@@ -8,7 +8,7 @@ Contrato del subconjunto de [OpenSubsonic](https://opensubsonic.netlify.app/) qu
 - Cada función responde en `/rest/{función}` y en `/rest/{función}.view`, con GET o POST de formulario (cuerpo de hasta 16 KiB).
 - Formato: `f=json` da `{"subsonic-response": {...}}`; sin `f` (o con `f=xml`) da XML con el espacio de nombres `http://subsonic.org/restapi`.
 - Las respuestas, también las de error, salen con **HTTP 200**; el fallo va en `status: "failed"` y en `error {code, message}`.
-- Una función que no está en la tabla responde el error `0` («Función no implementada»).
+- Los ids van como cadenas y las duraciones en segundos, como pide la especificación. Una función que no está en la tabla responde el error `0` («Función no implementada»).
 - Los parámetros llevan las credenciales: el servidor no los escribe en sus registros.
 
 ## Autenticación (ADR-031)
@@ -32,5 +32,8 @@ Usa siempre HTTPS fuera de casa: con `u` y `p` la contraseña viaja en cada peti
 | `ping` | sí | 1 | hecha |
 | `getLicense` | sí | 1 | hecha: `license {valid: true}` |
 | `getOpenSubsonicExtensions` | no | 1 | hecha: solo `apiKeyAuthentication` v1 |
-| `getMusicFolders`, `getArtists`, `getArtist`, `getAlbum`, `getAlbumList2`, `getSong`, `search3`, `getCoverArt` | sí | 2 | pendiente |
+| `getMusicFolders` | sí | 2 | hecha: una carpeta, «Biblioteca» (id 1) |
+| `getArtists` | sí | 2 | hecha: agrupados por inicial, `#` para lo que no empieza por letra; `ignoredArticles` vacío |
+| `getArtist` | sí | 2 | hecha: con sus álbumes; error 10 sin `id`, error 70 si no existe |
+| `getAlbum`, `getAlbumList2`, `getSong`, `search3`, `getCoverArt` | sí | 2 | pendiente |
 | `stream`, `download`, `scrobble` | sí | 3 | pendiente |
