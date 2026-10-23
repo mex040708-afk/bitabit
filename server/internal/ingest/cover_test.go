@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image/png"
 	"io"
 	"log/slog"
 	"os"
@@ -162,6 +163,77 @@ func TestImportKeepsAStrayCover(t *testing.T) {
 	if !exists(t, e.path("entrada", "a", "02.flac")) {
 		t.Error("la fuente se borró de la entrada")
 	}
+}
+
+// La carátula grande se importa con su miniatura de 256 px en JPEG; una carátula que
+// ya es pequeña no la necesita (ADR-017).
+func TestImportMakesAThumbnailOnlyForBigCovers(t *testing.T) {
+	e := newImportEnv(t)
+	dir := t.TempDir()
+	big := ffmpeg(t, dir, "big.png", "-f", "lavfi", "-i", "testsrc=s=1024x512", "-frames:v", "1")
+	e.put(t, "grande/01.flac", "44100", embedArgs(big)...)
+	bigAlbum := albumIDOf(t, e.pool, e.importOK(t, "grande/01.flac", ingest.Imported).TrackID)
+
+	thumb := readFile(t, e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", bigAlbum)))
+	if !bytes.HasPrefix(thumb, []byte{0xFF, 0xD8, 0xFF}) {
+		t.Fatal("la miniatura no es JPEG")
+	}
+	out := ffmpeg(t, dir, "thumb.png", "-i", e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", bigAlbum)), "-frames:v", "1")
+	if w, h := pngSize(t, out); w != 256 || h != 128 {
+		t.Errorf("la miniatura mide %dx%d, want 256x128", w, h)
+	}
+	if got := readFile(t, e.path("biblioteca", "covers", fmt.Sprintf("%d.png", bigAlbum))); len(got) <= len(thumb) {
+		t.Error("la carátula original quedó más pequeña que la miniatura")
+	}
+
+	small, _ := picture(t, dir, "small.jpg") // 64x64
+	e.put(t, "pequeno/01.flac", "44100", append(embedArgs(small), "-metadata", "album=Pequeño")...)
+	smallAlbum := albumIDOf(t, e.pool, e.importOK(t, "pequeno/01.flac", ingest.Imported).TrackID)
+	if exists(t, e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", smallAlbum))) {
+		t.Error("una carátula de 64 px no necesita miniatura")
+	}
+	if orphans, err := e.im.Recover(context.Background()); err != nil || len(orphans) != 0 {
+		t.Errorf("Recover = %v, %v; la miniatura de un álbum con carátula no es huérfana", orphans, err)
+	}
+	// Ni siquiera pasado el plazo de gracia: la miniatura es .jpg aunque la carátula sea .png.
+	thumbFile := e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", bigAlbum))
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	if err := os.Chtimes(thumbFile, longAgo, longAgo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.im.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if !exists(t, thumbFile) {
+		t.Error("Recover borró la miniatura de un álbum con carátula")
+	}
+}
+
+// Una carátula con demasiados píxeles se importa con su original y sin miniatura:
+// decodificarla para reducirla costaría a ffmpeg gigas de memoria.
+func TestImportSkipsTheThumbnailOfAHugeCover(t *testing.T) {
+	e := newImportEnv(t)
+	dir := t.TempDir()
+	huge := ffmpeg(t, dir, "huge.png", "-f", "lavfi", "-i", "color=c=gray:s=9000x9000", "-pix_fmt", "gray", "-frames:v", "1")
+	e.put(t, "enorme/01.flac", "44100", embedArgs(huge)...)
+	album := albumIDOf(t, e.pool, e.importOK(t, "enorme/01.flac", ingest.Imported).TrackID)
+
+	if !exists(t, e.path("biblioteca", "covers", fmt.Sprintf("%d.png", album))) {
+		t.Error("la carátula original no se importó")
+	}
+	if exists(t, e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", album))) {
+		t.Error("una carátula de 81 Mpx no debía decodificarse para la miniatura")
+	}
+}
+
+// pngSize lee el ancho y el alto de un PNG.
+func pngSize(t *testing.T, path string) (int, int) {
+	t.Helper()
+	cfg, err := png.DecodeConfig(bytes.NewReader(readFile(t, path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Width, cfg.Height
 }
 
 // Recover avisa de las carátulas que ningún álbum referencia y las devuelve, sin

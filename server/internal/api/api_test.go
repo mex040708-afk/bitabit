@@ -43,6 +43,7 @@ type fixture struct {
 	auth   *auth.Service
 	signer *stream.Signer
 	token  string // sesión abierta del test
+	dir    string // biblioteca de prueba
 
 	artist int64
 	albumA int64 // con carátula; su primera pista tiene FLAC y AAC
@@ -77,6 +78,7 @@ func newFixture(t *testing.T) *fixture {
 		pool:   pool,
 		auth:   authSvc,
 		signer: signer,
+		dir:    dir,
 		h: New(Config{
 			Pool:          pool,
 			Auth:          authSvc,
@@ -385,6 +387,33 @@ func TestCoverIsServedAsStoredOrNotFound(t *testing.T) {
 
 	missing := f.req(http.MethodGet, fmt.Sprintf("/api/v1/albums/%d/cover", f.albumB), "", f.bearer())
 	expectStatus(t, missing, http.StatusNotFound)
+}
+
+// size=256 da la miniatura si existe y, si no, la carátula original; otro valor es un 400.
+func TestCoverSizeServesTheThumbnailOrFallsBack(t *testing.T) {
+	f := newFixture(t)
+	url := fmt.Sprintf("/api/v1/albums/%d/cover?size=256", f.albumA)
+
+	rec := f.req(http.MethodGet, url, "", f.bearer())
+	expectStatus(t, rec, http.StatusOK)
+	if !bytes.Equal(rec.Body.Bytes(), coverBytes) {
+		t.Error("sin miniatura debía salir el original")
+	}
+
+	thumb := []byte("ÿØÿàminiatura")
+	if err := os.WriteFile(filepath.Join(f.dir, "covers", fmt.Sprintf("%d-256.jpg", f.albumA)), thumb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = f.req(http.MethodGet, url, "", f.bearer())
+	expectStatus(t, rec, http.StatusOK)
+	if !bytes.Equal(rec.Body.Bytes(), thumb) || rec.Header().Get("Content-Type") != "image/jpeg" {
+		t.Errorf("no es la miniatura: %q %q", rec.Body.Bytes(), rec.Header().Get("Content-Type"))
+	}
+
+	for _, size := range []string{"512", "0", "abc", ""} {
+		expectStatus(t, f.req(http.MethodGet, fmt.Sprintf("/api/v1/albums/%d/cover?size=%s", f.albumA, size), "", f.bearer()), http.StatusBadRequest)
+	}
+	expectStatus(t, f.req(http.MethodGet, fmt.Sprintf("/api/v1/albums/%d/cover?size=256", f.albumB), "", f.bearer()), http.StatusNotFound)
 }
 
 // El enlace es relativo y el propio servidor de audio lo acepta.
