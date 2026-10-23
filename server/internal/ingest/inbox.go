@@ -52,6 +52,13 @@ func NewInbox(dir string, quiet time.Duration) *Inbox {
 	return &Inbox{fsys: os.DirFS(dir), quiet: quiet, seen: map[string]observation{}}
 }
 
+// NewInboxFS vigila fsys, que es la carpeta de entrada. Con el fs.FS de un os.Root,
+// ni un enlace simbólico ni una carpeta cambiada por uno sacan el recorrido de ella
+// (ADR-032).
+func NewInboxFS(fsys fs.FS, quiet time.Duration) *Inbox {
+	return &Inbox{fsys: fsys, quiet: quiet, seen: map[string]observation{}}
+}
+
 // Scan recorre la entrada y devuelve los archivos de audio listos, en orden
 // alfabético. Ignora los ocultos y los enlaces simbólicos. Olvida los que ya no
 // están, para que si vuelven a aparecer el plazo empiece de cero.
