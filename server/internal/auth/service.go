@@ -81,9 +81,9 @@ func (s *Service) Login(ctx context.Context, ip netip.Addr, password, device str
 	if !hasPassword {
 		return "", Session{}, s.failure(ip, now)
 	}
-	ok, err := VerifyPassword(password, stored)
+	ok, err := s.verify(ctx, ip, password, stored)
 	if err != nil {
-		return "", Session{}, fmt.Errorf("comprobar la contraseña: %w", err)
+		return "", Session{}, err
 	}
 	if !ok {
 		return "", Session{}, s.failure(ip, now)
@@ -121,9 +121,9 @@ func (s *Service) CheckPassword(ctx context.Context, ip netip.Addr, password str
 		s.lock.succeeded(ip)
 		return nil
 	}
-	ok, err := VerifyPassword(password, stored)
+	ok, err := s.verify(ctx, ip, password, stored)
 	if err != nil {
-		return fmt.Errorf("comprobar la contraseña: %w", err)
+		return err
 	}
 	if !ok {
 		return s.failure(ip, now)
