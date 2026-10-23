@@ -37,6 +37,8 @@ public final class DiagnosticActivity extends AppCompatActivity {
     private static final String EXTRA_LINK = "enlace";
     /** Extra para empezar a reproducir sin pulsar el botón. */
     private static final String EXTRA_PLAY = "reproducir";
+    /** Extra con la dirección del servidor, si no es la de por defecto. */
+    static final String EXTRA_SERVER = "servidor";
 
     private EditText server;
     private EditText link;
@@ -59,6 +61,10 @@ public final class DiagnosticActivity extends AppCompatActivity {
         stop.setOnClickListener(v -> stop());
 
         Intent intent = getIntent();
+        String extraServer = intent.getStringExtra(EXTRA_SERVER);
+        if (extraServer != null && savedInstanceState == null) {
+            server.setText(extraServer);
+        }
         String extraLink = intent.getStringExtra(EXTRA_LINK);
         if (extraLink != null) {
             link.setText(extraLink);
