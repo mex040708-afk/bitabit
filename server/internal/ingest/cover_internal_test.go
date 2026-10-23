@@ -58,3 +58,28 @@ func TestImageExt(t *testing.T) {
 		})
 	}
 }
+
+// La miniatura solo se genera con un tamaño conocido y razonable: los bytes de la
+// carátula no acotan lo que ffmpeg decodifica.
+func TestPictureStreamFitsThumb(t *testing.T) {
+	tests := []struct {
+		name string
+		p    pictureStream
+		want bool
+	}{
+		{"normal", pictureStream{Index: 1, Width: 1024, Height: 1024}, true},
+		{"en el límite", pictureStream{Width: 8192, Height: 8192}, true},
+		{"bomba de descompresión", pictureStream{Width: 30000, Height: 30000}, false},
+		{"tira larguísima", pictureStream{Width: 100000, Height: 1000}, false},
+		{"sin tamaño", pictureStream{Index: 1}, false},
+		{"negativo", pictureStream{Width: -5, Height: 100}, false},
+		{"desbordaría un int de 32 bits", pictureStream{Width: 1 << 30, Height: 1 << 30}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.p.fitsThumb(); got != tt.want {
+				t.Errorf("fitsThumb(%+v) = %v, want %v", tt.p, got, tt.want)
+			}
+		})
+	}
+}
