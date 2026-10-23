@@ -40,7 +40,7 @@ func NewIPLimiter(rate float64, burst, maxEntries int) *IPLimiter {
 // Allow gasta una ficha de ip. Si no queda ninguna, devuelve false y cuánto falta
 // para la siguiente.
 func (l *IPLimiter) Allow(ip netip.Addr) (ok bool, retryAfter time.Duration) {
-	ip = ip.Unmap()
+	ip = Network(ip)
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -96,6 +96,21 @@ func RateLimit(l *IPLimiter, applies func(*http.Request) bool, ipOf func(*http.R
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// Network da la clave con la que se cuenta una IP: la propia para IPv4 (también la de
+// una IPv4 escrita como IPv6) y el prefijo /64 para IPv6. Un cliente IPv6 recibe una
+// /64 entera y le basta con cambiar de dirección dentro de ella para esquivar un
+// bloqueo o un límite por dirección (ADR-040).
+func Network(ip netip.Addr) netip.Addr {
+	ip = ip.Unmap().WithZone("")
+	if ip.Is6() {
+		p, err := ip.Prefix(64)
+		if err == nil {
+			return p.Addr()
+		}
+	}
+	return ip
 }
 
 // RemoteIP es la IP de la conexión (la real si el servidor lee el protocolo PROXY).

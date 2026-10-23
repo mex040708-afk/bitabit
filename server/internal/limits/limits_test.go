@@ -204,3 +204,39 @@ func TestRateLimitOnlyCountsMatchingRequests(t *testing.T) {
 		t.Errorf("tercera: %d, Retry-After %q; want 429", rec.Code, rec.Header().Get("Retry-After"))
 	}
 }
+
+func TestNetworkGroupsIPv6By64AndKeepsIPv4(t *testing.T) {
+	same := [][2]string{
+		{"2001:db8:1:2:aaaa::1", "2001:db8:1:2:bbbb::ffff"},
+		{"192.0.2.7", "::ffff:192.0.2.7"},
+	}
+	for _, p := range same {
+		if Network(netip.MustParseAddr(p[0])) != Network(netip.MustParseAddr(p[1])) {
+			t.Errorf("%s y %s deben contar como la misma", p[0], p[1])
+		}
+	}
+	different := [][2]string{
+		{"2001:db8:1:2::1", "2001:db8:1:3::1"}, // otra /64
+		{"192.0.2.7", "192.0.2.8"},
+	}
+	for _, p := range different {
+		if Network(netip.MustParseAddr(p[0])) == Network(netip.MustParseAddr(p[1])) {
+			t.Errorf("%s y %s no son la misma", p[0], p[1])
+		}
+	}
+	if got := Network(netip.MustParseAddr("2001:db8:1:2:aaaa::1")); got.String() != "2001:db8:1:2::" {
+		t.Errorf("Network = %v, want 2001:db8:1:2::", got)
+	}
+}
+
+func TestIPLimiterCountsAnIPv6RangeAsOne(t *testing.T) {
+	l := NewIPLimiter(0.001, 2, 10)
+	for _, a := range []string{"2001:db8:9:9::1", "2001:db8:9:9::2"} {
+		if ok, _ := l.Allow(netip.MustParseAddr(a)); !ok {
+			t.Fatalf("%s dentro de la ráfaga", a)
+		}
+	}
+	if ok, _ := l.Allow(netip.MustParseAddr("2001:db8:9:9::3")); ok {
+		t.Error("cambiar de dirección dentro de la /64 no debe dar fichas nuevas")
+	}
+}
