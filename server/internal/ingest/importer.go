@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -693,12 +694,17 @@ func (e *unsafeSourceError) Error() string { return e.reason }
 // error de sistema (se reintenta); uno que no se puede abrir con seguridad es un
 // unsafeSourceError.
 func (im *Importer) copySource(rel, work string) (copied string, sum [32]byte, err error) {
-	f, err := im.data.Open(path.Join("entrada", rel))
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", sum, fmt.Errorf("abrir %s: %w", rel, err)
+	// O_NONBLOCK: si entre el listado y la apertura alguien cambia el archivo por una
+	// tubería con nombre, abrirla sin él se quedaría esperando a un escritor para
+	// siempre y pararía la importación. Con él se abre y el Stat la rechaza.
+	f, err := im.data.OpenFile(path.Join("entrada", rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil && isUnsafePath(err) {
+		return "", sum, &unsafeSourceError{reason: "no se puede abrir de forma segura: " + err.Error()}
 	}
 	if err != nil {
-		return "", sum, &unsafeSourceError{reason: "no se puede abrir de forma segura: " + err.Error()}
+		// Un archivo que ya no está, sin permisos o demasiados abiertos son cosas del
+		// sistema que pueden pasar: se reintenta, no se manda a fallidos/.
+		return "", sum, fmt.Errorf("abrir %s: %w", rel, err)
 	}
 	defer f.Close() // solo lectura: cerrar no puede perder datos
 	// Se mira el archivo ya abierto, no su nombre: entre medias el nombre pudo cambiar.
@@ -715,14 +721,41 @@ func (im *Importer) copySource(rel, work string) (copied string, sum [32]byte, e
 		return "", sum, fmt.Errorf("crear la copia de trabajo: %w", err)
 	}
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(out, h), f); err != nil {
+	n, err := io.Copy(io.MultiWriter(out, h), f)
+	if err != nil {
 		return "", sum, errors.Join(fmt.Errorf("copiar %s: %w", rel, err), out.Close())
 	}
 	if err := out.Close(); err != nil {
 		return "", sum, fmt.Errorf("cerrar la copia de trabajo: %w", err)
 	}
+	// Si alguien seguía escribiendo el archivo mientras se copiaba, la copia es una
+	// foto a medias: se descarta y se reintenta cuando la vigilancia lo vea quieto.
+	after, err := f.Stat()
+	if err != nil {
+		return "", sum, fmt.Errorf("mirar %s tras copiarlo: %w", rel, err)
+	}
+	if err := checkUnchanged(info, after, n); err != nil {
+		return "", sum, fmt.Errorf("copiar %s: %w", rel, err)
+	}
 	copy(sum[:], h.Sum(nil))
 	return copied, sum, nil
+}
+
+// checkUnchanged dice si el archivo era el mismo antes y después de copiarlo: mismo
+// tamaño, misma fecha de modificación y tantos bytes copiados como medía.
+func checkUnchanged(before, after fs.FileInfo, copied int64) error {
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || copied != after.Size() {
+		return errors.New("el archivo cambió mientras se copiaba")
+	}
+	return nil
+}
+
+// isUnsafePath dice si err de abrir un archivo con el Root es que el camino sale de
+// la carpeta de datos (un enlace simbólico) o es un bucle de enlaces, y no un fallo
+// del sistema. os no exporta ese error, así que se reconoce por su texto; un test lo
+// vigila.
+func isUnsafePath(err error) bool {
+	return errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), "path escapes from parent")
 }
 
 // Los accesos a la carpeta de datos van por im.data (un os.Root): una ruta que
