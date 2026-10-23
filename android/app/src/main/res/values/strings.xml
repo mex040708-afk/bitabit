@@ -16,4 +16,41 @@
     <string name="error">No se pudo reproducir: %1$s</string>
     <string name="result">MD5 de lo que ha sonado:\n%1$s\n\n%2$d muestras, entregadas al sistema de sonido en %3$s.\nCompáralo con el MD5 del original en el servidor.</string>
     <string name="interrupted">Hubo un salto: el MD5 solo cuenta desde el último y no vale para comparar.</string>
+
+    <!-- Inicio de sesión -->
+    <string name="login_title">Entrar en Bitabit</string>
+    <string name="password_label">Contraseña</string>
+    <string name="login">Entrar</string>
+    <string name="login_running">Conectando…</string>
+    <string name="login_not_saved">Has entrado, pero la sesión no se pudo guardar: la próxima vez tendrás que escribir la contraseña.</string>
+    <string name="diagnostic">Diagnóstico</string>
+    <string name="session_expired">La sesión ya no vale. Vuelve a entrar.</string>
+    <string name="logged_out">Sesión cerrada.</string>
+    <string name="logout_offline">Se ha cerrado aquí, pero no en el servidor (%1$s). Puedes cerrarla desde otro dispositivo.</string>
+
+    <!-- Pantalla principal -->
+    <string name="home_server">Servidor: %1$s</string>
+    <string name="home_loading">Comprobando la sesión…</string>
+    <string name="home_info">%1$s %2$s, API %3$s</string>
+    <string name="retry">Reintentar</string>
+    <string name="logout">Cerrar sesión</string>
+    <string name="logout_running">Cerrando la sesión…</string>
+
+    <!-- Errores de la API (ApiException) y de la conexión -->
+    <string name="error_wrong_password">Contraseña incorrecta.</string>
+    <plurals name="error_wrong_password_attempts">
+        <item quantity="one">Contraseña incorrecta. Queda %d intento antes del bloqueo.</item>
+        <item quantity="other">Contraseña incorrecta. Quedan %d intentos antes del bloqueo.</item>
+    </plurals>
+    <string name="error_unauthorized">El servidor no acepta la sesión. Vuelve a entrar.</string>
+    <string name="error_blocked">Demasiados intentos: este dispositivo está bloqueado un rato.</string>
+    <plurals name="error_blocked_seconds">
+        <item quantity="one">Demasiados intentos. Vuelve a probar dentro de %d segundo.</item>
+        <item quantity="other">Demasiados intentos. Vuelve a probar dentro de %d segundos.</item>
+    </plurals>
+    <string name="error_server">El servidor respondió con un error %1$d (%2$s).</string>
+    <string name="error_incompatible">El servidor usa la API %1$s, que esta versión de la app no entiende.</string>
+    <string name="error_invalid">Dato no válido: %1$s</string>
+    <string name="error_network">No se pudo conectar con el servidor: %1$s</string>
+    <string name="error_unexpected">Error inesperado: %1$s</string>
 </resources>
