@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mex040708-afk/bitabit/server/internal/auth"
+	"github.com/mex040708-afk/bitabit/server/internal/stream"
 )
 
 const (
@@ -48,14 +49,16 @@ type Authenticator interface {
 
 // Config son las dependencias de la capa.
 type Config struct {
-	Library       *os.Root      // biblioteca/, de donde salen las carátulas
-	Pool          *pgxpool.Pool // el catálogo; sin él solo funcionan las funciones sin datos
+	Signer        *stream.Signer // firma los enlaces de /media a los que redirigen stream y download
+	Library       *os.Root       // biblioteca/, de donde salen las carátulas
+	Pool          *pgxpool.Pool  // el catálogo; sin él solo funcionan las funciones sin datos
 	Auth          Authenticator
 	ServerVersion string
 	Log           *slog.Logger
 }
 
 type server struct {
+	signer  *stream.Signer
 	library *os.Root
 	pool    *pgxpool.Pool
 	auth    Authenticator
@@ -65,7 +68,7 @@ type server struct {
 
 // New devuelve el manejador de /rest/. Se monta con mux.Handle("/rest/", …).
 func New(c Config) http.Handler {
-	s := &server{library: c.Library, pool: c.Pool, auth: c.Auth, version: c.ServerVersion, log: c.Log}
+	s := &server{signer: c.Signer, library: c.Library, pool: c.Pool, auth: c.Auth, version: c.ServerVersion, log: c.Log}
 	mux := http.NewServeMux()
 	endpoints := []struct {
 		name   string
@@ -84,6 +87,9 @@ func New(c Config) http.Handler {
 		{"getAlbumList2", plain(s.getAlbumList2), true},
 		{"search3", plain(s.search3), true},
 		{"getCoverArt", s.getCoverArt, true},
+		{"stream", s.stream, true},
+		{"download", s.download, true},
+		{"scrobble", plain(s.scrobble), true},
 	}
 	for _, e := range endpoints {
 		mux.HandleFunc("/rest/"+e.name, s.endpoint(e.handle, e.auth))

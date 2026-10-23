@@ -8,12 +8,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mex040708-afk/bitabit/server/internal/catalog"
 	"github.com/mex040708-afk/bitabit/server/internal/db"
 	"github.com/mex040708-afk/bitabit/server/internal/db/dbtest"
+	"github.com/mex040708-afk/bitabit/server/internal/stream"
 )
 
 func TestInitialGroupsByFirstLetter(t *testing.T) {
@@ -226,5 +228,95 @@ func TestLibraryFunctionsWithTheCatalog(t *testing.T) {
 		if got := errCode(t, get(t, h, http.MethodGet, "/rest/"+f, creds(url.Values{}))); got != codeMissingParameter {
 			t.Errorf("%s sin id: error %d", f, got)
 		}
+	}
+}
+
+func TestChooseFile(t *testing.T) {
+	tr := catalog.Track{DurationMS: 100_000, Files: []catalog.TrackFile{
+		{Quality: "orig", Bytes: 10_000_000},  // 800 kbit/s
+		{Quality: "aac256", Bytes: 3_200_000}, // 256 kbit/s
+	}}
+	cases := []struct {
+		name       string
+		raw        bool
+		maxBitRate int
+		want       string
+	}{
+		{"sin límite", false, 0, "orig"},
+		{"límite por encima", false, 1000, "orig"},
+		{"límite por debajo", false, 320, "aac256"},
+		{"raw ignora el límite", true, 320, "orig"},
+	}
+	for _, c := range cases {
+		if got, ok := chooseFile(tr, c.raw, c.maxBitRate); !ok || got.Quality != c.want {
+			t.Errorf("%s: %q, %v; want %q", c.name, got.Quality, ok, c.want)
+		}
+	}
+	onlyOrig := catalog.Track{DurationMS: 100_000, Files: tr.Files[:1]}
+	if got, _ := chooseFile(onlyOrig, false, 128); got.Quality != "orig" {
+		t.Errorf("sin AAC se manda el original, no %q", got.Quality)
+	}
+	if _, ok := chooseFile(catalog.Track{}, false, 0); ok {
+		t.Error("una pista sin archivos no tiene versión")
+	}
+}
+
+// stream y download redirigen a un enlace firmado de /media; scrobble no hace nada.
+func TestStreamRedirectsToASignedMediaLink(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	flac := db.TrackFile{Quality: db.QualityOriginal, Ext: "flac", Codec: "flac", Lossless: true, SampleRate: 44100, Bits: 16, Channels: 2, Bytes: 10_000_000, SHA256: [32]byte{1}}
+	aac := db.TrackFile{Quality: db.QualityAAC256, Ext: "m4a", Codec: "aac", SampleRate: 44100, Channels: 2, Bytes: 3_200_000, SHA256: [32]byte{2}}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackID, err := db.InsertTrack(ctx, tx, db.NewTrack{Title: "Uno", Artist: "Grupo", Album: "Disco", Duration: 100 * time.Second,
+		SourceSHA256: [32]byte{1}}, []db.TrackFile{flac, aac})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := stream.NewSigner([]stream.Key{{ID: "k1", Secret: bytes.Repeat([]byte{7}, 32)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{Signer: signer, Pool: pool, Auth: &fakeAuth{}, ServerVersion: "prueba", Log: quietLog()})
+	id := fmt.Sprint(trackID)
+	for _, c := range []struct {
+		name, path string
+		form       url.Values
+		want       string
+	}{
+		{"stream", "stream", url.Values{}, fmt.Sprintf("/media/%d.flac?q=orig&", trackID)},
+		{"stream limitado", "stream", url.Values{"maxBitRate": {"320"}}, fmt.Sprintf("/media/%d.m4a?q=aac256&", trackID)},
+		{"stream raw", "stream", url.Values{"maxBitRate": {"320"}, "format": {"raw"}}, fmt.Sprintf("/media/%d.flac?q=orig&", trackID)},
+		{"download", "download", url.Values{"maxBitRate": {"320"}}, fmt.Sprintf("/media/%d.flac?q=orig&", trackID)},
+	} {
+		c.form.Set("apiKey", "bueno")
+		c.form.Set("id", id)
+		rec := get(t, h, http.MethodGet, "/rest/"+c.path, c.form)
+		loc := rec.Header().Get("Location")
+		if rec.Code != http.StatusFound || !strings.HasPrefix(loc, c.want) || !strings.Contains(loc, "sig=") {
+			t.Errorf("%s: %d %q, want redirección a %s…", c.name, rec.Code, loc, c.want)
+		}
+		if rec.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: el enlace firmado no debe cachearse", c.name)
+		}
+	}
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/stream", url.Values{"apiKey": {"bueno"}, "f": {"json"}, "id": {"999999"}})); got != codeNotFound {
+		t.Errorf("pista inexistente: error %d", got)
+	}
+	if got := errCode(t, get(t, h, http.MethodGet, "/rest/stream", url.Values{"apiKey": {"bueno"}, "f": {"json"}, "id": {id}, "maxBitRate": {"x"}})); got != codeGeneric {
+		t.Errorf("maxBitRate no numérico: error %d", got)
+	}
+	ok := jsonBody(t, get(t, h, http.MethodGet, "/rest/scrobble", url.Values{"apiKey": {"bueno"}, "f": {"json"}, "id": {id}}))
+	if ok["status"] != "ok" {
+		t.Errorf("scrobble: %v", ok)
 	}
 }

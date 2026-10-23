@@ -40,4 +40,6 @@ Usa siempre HTTPS fuera de casa: con `u` y `p` la contraseña viaja en cada peti
 | `getAlbumList2` | sí | 2 | hecha: `newest` por fecha de importación; el resto, por nombre. `size` (10, máx. 500) y `offset`. Sin historial ni favoritos, `random`, `frequent`, `recent`, `highest`, `starred` y `byYear` caen en el orden por nombre |
 | `search3` | sí | 2 | hecha: artistas, álbumes y pistas con `artistCount`/`albumCount`/`songCount` y sus `…Offset`. Una búsqueda vacía (`""`) lista artistas y álbumes, sin pistas |
 | `getCoverArt` | sí | 2 | hecha: `id` es el del álbum (el campo `coverArt`); con `size` ≤ 256 sirve la miniatura si existe |
-| `stream`, `download`, `scrobble` | sí | 3 | pendiente |
+| `stream` | sí | 3 | hecha: responde **302** a un enlace firmado de `/media` (el audio lo sirve `/media`, con `Range`). Sin `maxBitRate` o con `format=raw`, el original; con `maxBitRate` por debajo de la tasa del original y AAC 256 disponible, el AAC. Nada se convierte al vuelo |
+| `download` | sí | 3 | hecha: igual, siempre el original |
+| `scrobble` | sí | 3 | hecha: no guarda nada (no hay historial) |
