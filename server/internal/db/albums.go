@@ -51,3 +51,12 @@ func AlbumCovers(ctx context.Context, q Querier, ids []int64) (map[int64]string,
 	}
 	return covers, nil
 }
+
+// CountAlbumCovers dice cuántos álbumes tienen carátula.
+func CountAlbumCovers(ctx context.Context, q Querier) (int, error) {
+	var n int
+	if err := q.QueryRow(ctx, "SELECT count(*) FROM albums WHERE cover_ext IS NOT NULL").Scan(&n); err != nil {
+		return 0, fmt.Errorf("contar las carátulas de los álbumes: %w", err)
+	}
+	return n, nil
+}

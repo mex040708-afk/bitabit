@@ -23,7 +23,7 @@ Cuenta única: el valor de `u` se ignora.
 
 Errores: `10` faltan credenciales · `40` usuario o contraseña incorrectos, o IP bloqueada · `42` mecanismo no admitido · `43` más de un mecanismo, o `apiKey` con `u` · `44` `apiKey` no válida.
 
-Usa siempre HTTPS fuera de casa: con `u` y `p` la contraseña viaja en cada petición.
+**Preferid `apiKey`.** `u` y `p` van en la URL (o en el cuerpo de un POST de formulario) y la contraseña viaja en cada petición: cualquier registro de un proxy o de un VPS por el que pase la verá. `apiKey` es el token de una sesión que se puede cerrar sin cambiar la contraseña. Para un cliente que solo sabe `u` y `p`, hay que usar siempre HTTPS fuera de casa y preferir POST de formulario, que no deja la contraseña en la URL de los registros. El servidor no escribe nunca los parámetros en sus registros. Cada comprobación de contraseña cuesta unos 100 ms y 64 MiB, así que el servidor deja como mucho 2 a la vez y recuerda 5 minutos una ya comprobada.
 
 ## Funciones
 

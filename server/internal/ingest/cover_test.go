@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"image/png"
+	"io"
 	"log/slog"
 	"os"
 	"slices"
@@ -387,6 +388,10 @@ func TestRecoverSurvivesAnOrphanCoverItCannotRemove(t *testing.T) {
 		t.Skip("root puede borrar en una carpeta de solo lectura")
 	}
 	e := newImportEnv(t)
+	// Un álbum con carátula, para que la base de datos no parezca equivocada.
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	e.importOK(t, "a/01.flac", ingest.Imported)
 	old := e.path("biblioteca", "covers", "4242.jpg")
 	if err := os.WriteFile(old, []byte("resto de un corte"), 0o640); err != nil {
 		t.Fatal(err)
@@ -420,5 +425,69 @@ func TestRecoverSurvivesAnOrphanCoverItCannotRemove(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "no se pudo borrar una carátula sin dueño") {
 		t.Errorf("falta el aviso en el registro: %s", logs.String())
+	}
+}
+
+// La salvaguarda: con una base de datos que no tiene ninguna carátula mientras en
+// disco hay, no se borra nada aunque los archivos sean viejos; y tampoco si habría que
+// borrar más de la mitad y más de 20.
+func TestRecoverDoesNotDeleteWhenTheDatabaseLooksWrong(t *testing.T) {
+	e := newImportEnv(t)
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	old := func(name string) string {
+		p := e.path("biblioteca", "covers", name)
+		if err := os.WriteFile(p, []byte("carátula de otra biblioteca"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	recover := func() {
+		t.Helper()
+		im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := im.Recover(context.Background()); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+	}
+
+	// 1. La base no tiene ninguna carátula y en disco hay una (vieja).
+	lonely := old("500.jpg")
+	recover()
+	if !exists(t, lonely) {
+		t.Fatal("se borró una carátula con una base de datos sin ninguna carátula")
+	}
+
+	// 2. Hay una carátula buena, pero habría que borrar 25 de 26: más de la mitad y más de 20.
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	e.importOK(t, "a/01.flac", ingest.Imported)
+	var many []string
+	for i := 0; i < 24; i++ {
+		many = append(many, old(fmt.Sprintf("%d.jpg", 1000+i)))
+	}
+	recover()
+	for _, p := range append(many, lonely) {
+		if !exists(t, p) {
+			t.Fatalf("se borró %s con una base de datos que parece equivocada", p)
+		}
+	}
+
+	// 3. Con pocas sin dueño frente a las buenas, sí se borra (lo normal).
+	for _, p := range many[1:] {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(lonely); err != nil {
+		t.Fatal(err)
+	}
+	recover()
+	if exists(t, many[0]) {
+		t.Error("una sola carátula sin dueño y vieja, con la base en orden, debía borrarse")
 	}
 }
