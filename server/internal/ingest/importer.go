@@ -554,7 +554,7 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 	}
 	unowned := 0
 	for _, c := range named {
-		if ext, ok := exts[c.albumID]; !ok || ext != c.ext {
+		if ext, ok := exts[c.albumID]; !ok || (!c.thumb && ext != c.ext) {
 			unowned++
 		}
 	}
