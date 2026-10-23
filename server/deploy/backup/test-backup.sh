@@ -3,9 +3,14 @@
 # de verdad con el binario de bitabit, hace la copia de la base de datos y de la
 # biblioteca con los scripts de esta carpeta, las restaura en otro sitio y compara.
 #
-# No toca la base «bitabit» más que con un esquema temporal (el usuario bitabit no
-# puede crear bases), ni /srv/bitabit ni /etc/bitabit: todo va a /tmp y se borra
-# al acabar.
+# No toca la base «bitabit» más que con un esquema temporal, ni /srv/bitabit ni
+# /etc/bitabit: todo va a /tmp y se borra al acabar.
+#
+# Requisito previo: una base de datos vacía para restaurar, con dueño bitabit. La
+# crea el administrador, porque el usuario bitabit no puede crear bases:
+#   sudo -u postgres createdb -O bitabit -E UTF8 bitabit_restore_test
+# Otro nombre se da con BITABIT_RESTORE_TEST_DB. La prueba la vacía al acabar,
+# pero no la borra.
 #
 # Uso (como el usuario bitabit, nunca root):
 #   test-backup.sh <binario bitabit para Linux>
@@ -28,6 +33,23 @@ for cmd in ffmpeg psql pg_restore rsync sha256sum; do
 done
 
 schema="bitabit_e2e_backup_$$"
+target_db="${BITABIT_RESTORE_TEST_DB:-bitabit_restore_test}"
+if [[ ! "$target_db" =~ ^[a-z_][a-z0-9_]{0,62}$ || "$target_db" == bitabit ]]; then
+	echo "BITABIT_RESTORE_TEST_DB no es un nombre válido (y no puede ser bitabit)." >&2
+	exit 2
+fi
+if ! psql -d "$target_db" -qAtX -c "SELECT 1" >/dev/null 2>&1; then
+	echo "Falta la base de pruebas $target_db: créala como postgres con «createdb -O bitabit -E UTF8 $target_db»." >&2
+	exit 2
+fi
+# Vaciar la base de pruebas: solo se borran los esquemas que crean estas pruebas.
+empty_target() {
+	local s
+	for s in $(psql -d "$target_db" -AtX -c "SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'bitabit\_e2e\_backup\_%'"); do
+		psql -d "$target_db" -qX -c "DROP SCHEMA IF EXISTS $s CASCADE" >/dev/null
+	done
+}
+empty_target
 work="$(mktemp -d /tmp/bitabit-backup-e2e.XXXXXX)"
 pid=""
 cleanup() {
@@ -35,7 +57,8 @@ cleanup() {
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	fi
-	psql -d bitabit -qX -c "DROP SCHEMA IF EXISTS ${schema} CASCADE" -c "DROP SCHEMA IF EXISTS ${schema}_orig CASCADE" >/dev/null 2>&1 || true
+	psql -d bitabit -qX -c "DROP SCHEMA IF EXISTS ${schema} CASCADE" >/dev/null 2>&1 || true
+	empty_target 2>/dev/null || true
 	rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -114,10 +137,7 @@ check "hay una instantánea de la biblioteca con su original" test -n "$(find "$
 check "la copia de la base de datos es 0600" test "$(stat -c %a "$dump")" = 600
 check "la clave de enlaces no está en ninguna parte de la copia" bash -c "! grep -rq 'clave-de-prueba-que-no-debe-salir' -- '$backups'"
 
-echo "== Restauración de la biblioteca con restore.sh"
-# restore.sh restaura la base en una base de datos que no sea «bitabit»; como el
-# usuario bitabit no puede crear bases, aquí la base se restaura a mano (abajo) y de
-# restore.sh se prueba la biblioteca y que se niega a lo que no debe.
+echo "== restore.sh se niega a lo que no debe"
 check "restore.sh se niega a restaurar sobre /srv/bitabit" bash -c "! '$here/restore.sh' --copias '$backups' --base otra --datos /srv/bitabit 2>/dev/null"
 check "restore.sh se niega a restaurar sobre la base bitabit" bash -c "! '$here/restore.sh' --copias '$backups' --base bitabit --datos '$work/x' 2>/dev/null"
 check "restore.sh rechaza una fecha mal escrita" bash -c "! '$here/restore.sh' --copias '$backups' --fecha ayer --base otra --datos '$work/x' 2>/dev/null"
@@ -125,35 +145,36 @@ code=0
 "$here/restore.sh" --copias "$work/no-hay" --base otra --datos "$work/x" >/dev/null 2>&1 || code=$?
 check "restore.sh sin copias sale con 4" test "$code" = 4
 
+echo "== Restauración con restore.sh en $target_db y una carpeta nueva"
 restored="$work/restaurado"
-mkdir -p "$restored/biblioteca"
-for part in orig aac covers; do
-	[[ -d "$snapshot/$part" ]] && rsync -a -- "$snapshot/$part/" "$restored/biblioteca/$part/"
-done
+check "restore.sh restaura la última copia" "$here/restore.sh" --copias "$backups" --base "$target_db" --datos "$restored"
+code=0
+"$here/restore.sh" --copias "$backups" --base "$target_db" --datos "$work/otra" >/dev/null 2>&1 || code=$?
+check "restore.sh no restaura sobre una base que ya tiene tablas" test "$code" = 2
 check "la biblioteca restaurada es idéntica a la original" diff -r "$data/biblioteca/orig" "$restored/biblioteca/orig"
 # Las carátulas solo existen con el PR de carátulas de la importación: si hay, se comparan.
 if [[ -d "$data/biblioteca/covers" ]]; then
 	check "las carátulas restauradas son idénticas" diff -r "$data/biblioteca/covers" "$restored/biblioteca/covers"
 fi
 check "el AAC restaurado es idéntico" diff -r "$data/biblioteca/aac" "$restored/biblioteca/aac"
-
-echo "== Restauración de la base de datos en un esquema aparte"
-psql -d bitabit -qX -c "ALTER SCHEMA ${schema} RENAME TO ${schema}_orig" >/dev/null
-check "pg_restore de la copia" pg_restore --no-owner --no-privileges --exit-on-error -d bitabit -- "$dump"
+check "entrada/ y fallidos/ restauradas vacías" test -z "$(find "$restored/entrada" "$restored/fallidos" -mindepth 1)"
 same_rows() {
-	local a b
-	a="$(psql -d bitabit -AtX -c "SELECT md5(string_agg(t::text, '|' ORDER BY id)) FROM ${schema}_orig.tracks t")"
-	b="$(psql -d bitabit -AtX -c "SELECT md5(string_agg(t::text, '|' ORDER BY id)) FROM ${schema}.tracks t")"
+	local table=$1 a b
+	a="$(psql -d bitabit -AtX -c "SELECT md5(string_agg(t::text, '|' ORDER BY t::text)) FROM ${schema}.${table} t")"
+	b="$(psql -d "$target_db" -AtX -c "SELECT md5(string_agg(t::text, '|' ORDER BY t::text)) FROM ${schema}.${table} t")"
 	[[ -n "$a" && "$a" == "$b" ]]
 }
-check "las pistas restauradas son las mismas" same_rows
+for table in tracks track_files albums artists account; do
+	check "la tabla $table restaurada es igual" same_rows "$table"
+done
 hashes_match() {
-	local id ext want got ok=0
+	local id ext want got ok=0 n=0
 	while IFS='|' read -r id ext want; do
 		got="$(sha256sum -- "$restored/biblioteca/orig/$id.$ext" | cut -d' ' -f1)"
 		[[ "$got" == "$want" ]] || ok=1
-	done < <(psql -d bitabit -AtX -c "SELECT track_id, ext, encode(sha256, 'hex') FROM ${schema}.track_files WHERE quality = 'orig'")
-	return "$ok"
+		n=$((n + 1))
+	done < <(psql -d "$target_db" -AtX -c "SELECT track_id, ext, encode(sha256, 'hex') FROM ${schema}.track_files WHERE quality = 'orig'")
+	[[ $n -gt 0 ]] && return "$ok"
 }
 check "los originales restaurados cuadran con los SHA-256 de la base restaurada" hashes_match
 
