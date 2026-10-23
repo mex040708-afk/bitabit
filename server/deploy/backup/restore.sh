@@ -61,6 +61,7 @@ if [[ -n "$when" ]]; then
 	dump="$backups/db/bitabit-$when.dump"
 	snapshot="$backups/library/$when"
 else
+	[[ -d "$backups/db" ]] || die 4 "no hay copias de la base de datos en $backups/db"
 	dump="$(find "$backups/db" -maxdepth 1 -type f -regextype posix-extended -regex '.*/bitabit-[0-9]{8}T[0-9]{6}Z\.dump' -printf '%f\n' 2>/dev/null | sort | tail -n 1)"
 	[[ -n "$dump" ]] || die 4 "no hay ninguna copia de la base de datos en $backups/db"
 	dump="$backups/db/$dump"
