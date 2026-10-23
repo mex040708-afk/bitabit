@@ -530,7 +530,9 @@ func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
 		}
 		id, err := strconv.ParseInt(idText, 10, 64)
 		// ParseInt acepta «+12»; la carátula del álbum 12 solo puede llamarse «12».
-		if err != nil || f.IsDir() || idText != strconv.FormatInt(id, 10) {
+		// Y solo se borra lo que el importador pudo escribir: ID positivo y jpg o png
+		// («12.txt», «12.jpg.bak» o «-5.jpg» no son suyos).
+		if err != nil || f.IsDir() || idText != strconv.FormatInt(id, 10) || id <= 0 || (ext != "jpg" && ext != "png") {
 			orphans = append(orphans, filepath.Join(im.coverDir(), f.Name()))
 			im.log.Warn("archivo en covers/ que no tiene forma de carátula; no se borra",
 				"archivo", path.Join(library.CoverDir, f.Name()))
@@ -583,7 +585,9 @@ func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name s
 	file := filepath.Join(im.coverDir(), name)
 	info, err := os.Lstat(file)
 	if err != nil {
-		return false, fmt.Errorf("mirar la carátula %s: %w", name, err)
+		// Una carátula que no se puede ni mirar no debe impedir que el servidor arranque.
+		im.log.Warn("no se pudo mirar una carátula sin dueño; se deja", "archivo", name, "error", err)
+		return false, nil
 	}
 	if !info.Mode().IsRegular() || im.now().Sub(info.ModTime()) < OrphanCoverGrace {
 		return false, nil
@@ -596,7 +600,10 @@ func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name s
 		return false, nil
 	}
 	if err := os.Remove(file); err != nil {
-		return false, fmt.Errorf("borrar la carátula %s: %w", name, err)
+		// Si no se puede borrar (permisos, disco de solo lectura), el servidor arranca
+		// igual: la carátula sigue en la lista de huérfanos y se avisa.
+		im.log.Warn("no se pudo borrar una carátula sin dueño; se deja", "archivo", name, "error", err)
+		return false, nil
 	}
 	return true, nil
 }

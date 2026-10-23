@@ -208,6 +208,23 @@ func TestImportMakesAThumbnailOnlyForBigCovers(t *testing.T) {
 	}
 }
 
+// Una carátula con demasiados píxeles se importa con su original y sin miniatura:
+// decodificarla para reducirla costaría a ffmpeg gigas de memoria.
+func TestImportSkipsTheThumbnailOfAHugeCover(t *testing.T) {
+	e := newImportEnv(t)
+	dir := t.TempDir()
+	huge := ffmpeg(t, dir, "huge.png", "-f", "lavfi", "-i", "color=c=gray:s=9000x9000", "-pix_fmt", "gray", "-frames:v", "1")
+	e.put(t, "enorme/01.flac", "44100", embedArgs(huge)...)
+	album := albumIDOf(t, e.pool, e.importOK(t, "enorme/01.flac", ingest.Imported).TrackID)
+
+	if !exists(t, e.path("biblioteca", "covers", fmt.Sprintf("%d.png", album))) {
+		t.Error("la carátula original no se importó")
+	}
+	if exists(t, e.path("biblioteca", "covers", fmt.Sprintf("%d-256.jpg", album))) {
+		t.Error("una carátula de 81 Mpx no debía decodificarse para la miniatura")
+	}
+}
+
 // pngSize lee el ancho y el alto de un PNG.
 func pngSize(t *testing.T, path string) (int, int) {
 	t.Helper()
@@ -322,5 +339,86 @@ func TestRecoverRemovesOldOrphanCovers(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "carátula sin dueño borrada") {
 		t.Errorf("falta el aviso del borrado en el registro: %s", logs.String())
+	}
+}
+
+// Solo se borra lo que el importador pudo escribir: ID positivo y jpg o png. Un
+// archivo viejo con otro nombre, una carpeta o un enlace simbólico se quedan.
+func TestRecoverOnlyRemovesFilesShapedLikeCovers(t *testing.T) {
+	e := newImportEnv(t)
+	covers := e.path("biblioteca", "covers")
+	stay := []string{"12.txt", "12.jpg.bak", "-5.jpg", "0.jpg", "012.jpg", "12-256.png"}
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	for _, name := range stay {
+		p := e.path("biblioteca", "covers", name)
+		if err := os.WriteFile(p, []byte("no es nuestro"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(e.path("biblioteca", "covers", "777.jpg"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stay = append(stay, "777.jpg")
+	if err := os.Symlink("12.txt", e.path("biblioteca", "covers", "778.jpg")); err == nil {
+		stay = append(stay, "778.jpg")
+	}
+
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := im.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	for _, name := range stay {
+		if _, err := os.Lstat(covers + "/" + name); err != nil {
+			t.Errorf("Recover borró %s: %v", name, err)
+		}
+	}
+}
+
+// Si una carátula sin dueño no se puede borrar, el servidor arranca igual: Recover
+// avisa y la deja entre los huérfanos.
+func TestRecoverSurvivesAnOrphanCoverItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root puede borrar en una carpeta de solo lectura")
+	}
+	e := newImportEnv(t)
+	old := e.path("biblioteca", "covers", "4242.jpg")
+	if err := os.WriteFile(old, []byte("resto de un corte"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	if err := os.Chtimes(old, longAgo, longAgo); err != nil {
+		t.Fatal(err)
+	}
+	covers := e.path("biblioteca", "covers")
+	if err := os.Chmod(covers, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// Sin permisos de escritura, t.TempDir no podría borrar la carpeta al acabar.
+	t.Cleanup(func() {
+		if err := os.Chmod(covers, 0o750); err != nil {
+			t.Error(err)
+		}
+	})
+
+	var logs bytes.Buffer
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := im.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover: %v; un fallo al borrar no debe impedir el arranque", err)
+	}
+	if !slices.Equal(got, []string{old}) {
+		t.Errorf("huérfanos %v, want [%s]", got, old)
+	}
+	if !strings.Contains(logs.String(), "no se pudo borrar una carátula sin dueño") {
+		t.Errorf("falta el aviso en el registro: %s", logs.String())
 	}
 }
