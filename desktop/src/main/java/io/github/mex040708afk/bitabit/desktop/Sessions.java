@@ -142,6 +142,17 @@ final class Sessions {
     }
 
     /**
+     * El servidor ha dejado de aceptar el token (401): se borra el archivo y se olvida el
+     * token, sin llamar al servidor, que ya la dio por cerrada.
+     *
+     * @throws IOException si no se pudo borrar el archivo
+     */
+    void expire(Active session) throws IOException {
+        session.client().forgetToken();
+        store.delete();
+    }
+
+    /**
      * Cierra la sesión en el servidor y borra la guardada. El archivo se borra aunque el
      * servidor no responda: quien cierra sesión quiere que el token deje de estar aquí.
      *
