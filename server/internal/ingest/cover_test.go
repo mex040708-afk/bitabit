@@ -356,3 +356,37 @@ func TestImportRefusesASymlinkLeavingTheDataDir(t *testing.T) {
 		t.Error("el enlace sigue en entrada/")
 	}
 }
+
+// Un enlace simbólico a una carpeta de fuera: ni la vigilancia la recorre ni Import
+// lee lo que hay dentro (ADR-032).
+func TestInboxAndImportDoNotFollowADirectorySymlinkOut(t *testing.T) {
+	e := newImportEnv(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "a.flac"), []byte("fuera de la carpeta de datos"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, e.path("entrada", "carpeta")); err != nil {
+		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
+	}
+
+	root, err := os.OpenRoot(e.path("entrada"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ready, err := ingest.NewInboxFS(root.FS(), 0).Scan(time.Now())
+	if err != nil || len(ready) != 0 {
+		t.Errorf("Scan = %v, %v; no debía ver nada tras el enlace", ready, err)
+	}
+
+	res, err := e.im.Import(context.Background(), "carpeta/a.flac")
+	if err == nil && res.Outcome == ingest.Imported {
+		t.Fatalf("Import importó algo de fuera: %+v", res)
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+	if got := readFile(t, filepath.Join(outside, "a.flac")); string(got) != "fuera de la carpeta de datos" {
+		t.Error("el archivo de fuera cambió")
+	}
+}

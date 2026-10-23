@@ -124,6 +124,10 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 	return im, nil
 }
 
+// Close suelta la carpeta de datos abierta. Solo lee de ella al cerrar, así que
+// no puede perder datos.
+func (im *Importer) Close() error { return im.data.Close() }
+
 // Run importa lo que esté listo en la entrada cada interval, hasta que se
 // cancele ctx. Los fallos del sistema se registran y el archivo se reintenta en
 // la siguiente pasada.

@@ -105,6 +105,7 @@ func serve(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer im.Close() // solo lectura al cerrar: no puede perder datos
 	if _, err := im.Recover(ctx); err != nil {
 		return err
 	}
