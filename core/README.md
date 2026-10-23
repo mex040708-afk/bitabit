@@ -52,6 +52,13 @@ gradle test
 El repositorio no versiona el `gradle-wrapper.jar`, por ser binario. Para usar
 `./gradlew`, cópialo de `desktop/gradle/wrapper/`.
 
+## Desde las apps
+
+Cada app incluye este build con `includeBuild("../core")` en su `settings.gradle.kts`
+y depende de `io.github.mex040708afk.bitabit:bitabit-core`; Gradle la cambia por este
+proyecto. En una aplicación modular (el escritorio), el módulo se llama
+`io.github.mex040708afk.bitabit.core`.
+
 ## Para Android
 
 R8 necesita una regla para los modelos, porque Gson los lee por reflexión:
