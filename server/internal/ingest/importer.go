@@ -203,11 +203,7 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	// trabajo calculando su hash: la sonda, las versiones y la carátula leen esos
 	// mismos bytes, y ningún proceso externo recibe un nombre de entrada/ que
 	// alguien pueda cambiar por un enlace simbólico (ADR-032).
-	limit, err := im.sourceLimit(ctx)
-	if err != nil {
-		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
-	}
-	copied, sum, err := im.copySource(rel, work, limit)
+	copied, sum, err := im.copySource(rel, work, maxSourceBytes)
 	var unsafe *unsafeSourceError
 	var tooBig *tooBigError
 	switch {
@@ -991,32 +987,13 @@ func (im *Importer) readDir(abs string) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
-// Tope de tamaño de una fuente (decisión del desarrollador, 2026-10-23): el doble del
-// mayor original de la biblioteca, entre 4 y 8 GiB. Con la biblioteca vacía, 4 GiB.
-const (
-	minSourceLimit = 4 << 30
-	maxSourceLimit = 8 << 30
-)
+// maxSourceBytes es el tope fijo de una fuente en entrada/ (decisión del desarrollador,
+// 2026-10-23): 8 GiB por archivo. Lo que pasa va a fallidos/ con su nota, sin leerlo.
+const maxSourceBytes = 8 << 30
 
 // tooBigError es una fuente que pasa del tope de tamaño.
 type tooBigError struct{ size, limit int64 }
 
 func (e *tooBigError) Error() string {
 	return fmt.Sprintf("el archivo pesa más de %d MiB, el máximo es %d MiB", e.size>>20, e.limit>>20)
-}
-
-// sourceLimit calcula el tope de tamaño de una fuente ahora.
-func (im *Importer) sourceLimit(ctx context.Context) (int64, error) {
-	largest, err := db.MaxOriginalBytes(ctx, im.pool)
-	if err != nil {
-		return 0, err
-	}
-	return clampSourceLimit(largest), nil
-}
-
-func clampSourceLimit(largestOriginal int64) int64 {
-	if largestOriginal > maxSourceLimit/2 {
-		return maxSourceLimit
-	}
-	return max(minSourceLimit, 2*largestOriginal)
 }

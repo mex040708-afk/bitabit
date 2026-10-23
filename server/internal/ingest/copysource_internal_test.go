@@ -160,18 +160,3 @@ func TestCopySourceRefusesAFileOverTheLimitWithoutCopyingIt(t *testing.T) {
 		t.Errorf("no debía copiarse nada, pero la carpeta de trabajo tiene %d archivos", len(entries))
 	}
 }
-
-func TestClampSourceLimit(t *testing.T) {
-	const gib = 1 << 30
-	for largest, want := range map[int64]int64{
-		0:         4 * gib, // biblioteca vacía
-		200 << 20: 4 * gib, // el doble de 200 MiB no llega al mínimo
-		3 * gib:   6 * gib, // el doble
-		4 * gib:   8 * gib,
-		10 * gib:  8 * gib, // el máximo
-	} {
-		if got := clampSourceLimit(largest); got != want {
-			t.Errorf("clampSourceLimit(%d) = %d, want %d", largest, got, want)
-		}
-	}
-}

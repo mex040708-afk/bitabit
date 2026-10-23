@@ -558,8 +558,8 @@ func TestRecoverDoesNotDeleteWhenTheDatabaseLooksWrong(t *testing.T) {
 	}
 }
 
-// Una fuente que pasa del tope (4 GiB con la biblioteca vacía) va a fallidos/ con su
-// nota, sin leerse: es un archivo disperso, así que leerlo entero costaría segundos.
+// Una fuente que pasa del tope fijo de 8 GiB va a fallidos/ con su nota, sin leerse:
+// es un archivo disperso, así que leerlo entero costaría segundos.
 func TestImportSendsAFileOverTheLimitToFailedWithItsNote(t *testing.T) {
 	e := newImportEnv(t)
 	big := e.path("entrada", "enorme.flac")
@@ -567,9 +567,9 @@ func TestImportSendsAFileOverTheLimitToFailedWithItsNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(5 << 30); err != nil {
+	if err := f.Truncate(9 << 30); err != nil {
 		f.Close()
-		t.Skipf("no se puede crear un archivo disperso de 5 GiB aquí: %v", err)
+		t.Skipf("no se puede crear un archivo disperso de 9 GiB aquí: %v", err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)

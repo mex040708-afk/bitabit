@@ -186,13 +186,3 @@ func nullIfZero(n int) any {
 func durationMS(d time.Duration) int64 {
 	return max(1, d.Milliseconds())
 }
-
-// MaxOriginalBytes es el tamaño del mayor archivo original de la biblioteca, o 0 si
-// aún no hay ninguno.
-func MaxOriginalBytes(ctx context.Context, q Querier) (int64, error) {
-	var n int64
-	if err := q.QueryRow(ctx, "SELECT coalesce(max(bytes), 0) FROM track_files WHERE quality = $1", QualityOriginal).Scan(&n); err != nil {
-		return 0, fmt.Errorf("buscar el mayor original: %w", err)
-	}
-	return n, nil
-}
