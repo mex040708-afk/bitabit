@@ -39,6 +39,7 @@ const (
 
 	maxFormBytes   = 16 << 10
 	requestTimeout = 30 * time.Second
+	writeTimeout   = 2 * time.Minute
 )
 
 // Authenticator es lo que la capa necesita de auth.Service.
@@ -103,7 +104,24 @@ func New(c Config) http.Handler {
 	mux.HandleFunc("/rest/", s.endpoint(plain(func(*http.Request) *response {
 		return s.fail(codeGeneric, "Función no implementada.")
 	}), true))
-	return mux
+	return s.hardened(mux)
+}
+
+// hardened pone a toda respuesta de /rest/ (también la del audio y las imágenes) las
+// cabeceras que /api ya tiene, y un plazo de escritura: sin él, un cliente que lee
+// despacio retendría la conexión, porque el servidor no tiene WriteTimeout global.
+func (s *server) hardened(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeTimeout))
+		if err != nil && !errors.Is(err, http.ErrNotSupported) {
+			// No se corta la petición: solo se queda sin plazo de escritura.
+			s.log.Warn("poner el plazo de escritura de /rest", "error", err)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // plain adapta una función que solo devuelve datos.
