@@ -1,65 +1,50 @@
 package io.github.mex040708afk.bitabit.desktop;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
+import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
-import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
-import javafx.scene.control.TextField;
-import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
 /**
- * Prototipo de escritorio de la fase 1 (ADR-013): pega un enlace de «bitabit
- * link» y lo escucha o mide su MD5.
+ * La app de escritorio: inicia sesión en el servidor (ADR-025) y, por ahora, enseña el
+ * panel de diagnóstico del prototipo de la fase 1 (ADR-013).
  *
- * <p>Para las pruebas automáticas se puede arrancar con
- * {@code --enlace-archivo=RUTA} (el enlace, en la primera línea de un archivo,
- * para que no salga en la lista de procesos), {@code --accion=medir|escuchar},
- * {@code --exclusivo=no} y {@code --salir}, que cierra al terminar con el código
- * 0 si todo cuadra y 1 si no. El resultado se escribe también en la salida
- * estándar, sin la firma del enlace.
+ * <p>Las pruebas automáticas del prototipo siguen funcionando sin sesión: con
+ * {@code --enlace-archivo=RUTA} o {@code --accion=medir|escuchar} la app abre solo el
+ * panel de diagnóstico, y {@code --exclusivo=no} y {@code --salir} hacen lo mismo que
+ * antes (ver {@link DiagnosticsView}).
  */
 public final class App extends Application {
 
-    private final String mpv = System.getenv().getOrDefault("BITABIT_MPV", "mpv");
-    private final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
-    private final ExecutorService worker = Executors.newSingleThreadExecutor(task -> {
-        Thread t = new Thread(task, "trabajo");
+    /** La red, nunca en el hilo de JavaFX (ADR-026). Un hilo basta: las llamadas van de una en una. */
+    private final ExecutorService network = Executors.newSingleThreadExecutor(task -> {
+        Thread t = new Thread(task, "red");
         t.setDaemon(true);
         return t;
     });
 
-    private final TextField link = new TextField();
-    private final CheckBox exclusive = new CheckBox("Modo exclusivo (WASAPI)");
-    private final Button listen = new Button("Escuchar");
-    private final Button measure = new Button("Medir");
-    private final Button stop = new Button("Parar");
-    private final Label status = new Label("Pega un enlace de «bitabit link».");
-    private final Label formats = new Label();
-    private final TextField md5 = new TextField();
-    private final Label verdict = new Label();
+    private final Sessions sessions = new Sessions(new SessionStore(SessionStore.defaultDir()),
+            Sessions.deviceName(System.getenv()));
+
+    private Scene scene;
+    private DiagnosticsView diagnostics;
+    private LoginView login;
+    private MainView main;
 
     /** Solo se toca desde el hilo de JavaFX. */
-    private Listen listening;
-    private boolean exitWhenDone;
+    private Sessions.Active active;
 
     public static void main(String[] args) {
         launch(args);
@@ -67,210 +52,129 @@ public final class App extends Application {
 
     @Override
     public void start(Stage stage) {
-        link.setPromptText("http://localhost:8080/media/1.flac?q=orig&exp=…");
-        exclusive.setSelected(true);
-        md5.setEditable(false);
-        md5.setPromptText("MD5 de lo que suena");
-        for (Label label : List.of(status, formats, verdict)) {
-            label.setWrapText(true);
-        }
-        stop.setDisable(true);
-        listen.setOnAction(e -> startListening());
-        measure.setOnAction(e -> startMeasuring());
-        stop.setOnAction(e -> stopListening());
-
-        VBox root = new VBox(10,
-                new Label("Enlace"), link,
-                new HBox(10, exclusive, listen, measure, stop),
-                status, formats, md5, verdict);
-        root.setPadding(new Insets(16));
+        Map<String, String> named = getParameters().getNamed();
+        boolean exitWhenDone = getParameters().getRaw().contains("--salir");
+        diagnostics = new DiagnosticsView(exitWhenDone, this::exit);
+        scene = new Scene(new VBox(), 640, 480);
         stage.setTitle("Bitabit");
-        stage.setScene(new Scene(root, 640, 320));
-        stage.show();
+        stage.setScene(scene);
 
-        autostart();
+        if (named.containsKey("enlace-archivo") || named.containsKey("accion")) {
+            VBox root = new VBox(diagnostics.root());
+            root.setPadding(new Insets(16));
+            scene.setRoot(root);
+            stage.show();
+            diagnostics.autostart(named);
+            return;
+        }
+
+        login = new LoginView(this::login);
+        main = new MainView(diagnostics.root(), this::logout);
+        stage.show();
+        resume();
     }
 
     @Override
     public void stop() {
-        stopListening();
-        worker.shutdownNow();
-        http.close();
+        diagnostics.close();
+        network.shutdownNow();
     }
 
-    private void autostart() {
-        Map<String, String> named = getParameters().getNamed();
-        exitWhenDone = getParameters().getRaw().contains("--salir");
-        exclusive.setSelected(!"no".equals(named.get("exclusivo")));
-        String file = named.get("enlace-archivo");
-        if (file == null) {
-            return;
-        }
+    private void resume() {
+        scene.setRoot(notice("Comprobando la sesión guardada…", Optional.empty()));
+        inBackground(sessions::resume, result -> {
+            switch (result) {
+                case Sessions.Resumed r -> showMain(r.session());
+                case Sessions.NeedsLogin n -> showLogin(n.server(), n.notice());
+                case Sessions.Unreachable u -> scene.setRoot(notice(u.message()
+                        + "\nLa sesión sigue guardada.", Optional.of(this::resume)));
+            }
+        }, e -> scene.setRoot(notice("No se pudo comprobar la sesión guardada: " + e.getMessage(),
+                Optional.of(this::resume))));
+    }
+
+    private void login(String server, String password) {
+        String address;
         try {
-            List<String> lines = Files.readAllLines(Path.of(file));
-            link.setText(lines.isEmpty() ? "" : lines.get(0));
-        } catch (IOException e) {
-            fail("No se pudo leer el enlace: " + e.getMessage());
+            address = ServerAddress.parse(server);
+        } catch (IllegalArgumentException e) {
+            login.message(e.getMessage());
             return;
         }
-        switch (named.getOrDefault("accion", "")) {
-            case "medir" -> startMeasuring();
-            case "escuchar" -> startListening();
-            default -> {
-                // Sin acción: el enlace queda pegado y se elige a mano.
-            }
-        }
-    }
-
-    private Optional<URI> pastedLink() {
-        Optional<URI> uri = Links.parse(link.getText());
-        if (uri.isEmpty()) {
-            fail("El enlace no vale: tiene que ser http(s)://…/media/{id}.{ext}?… con su firma.");
-        }
-        return uri;
-    }
-
-    private void startMeasuring() {
-        Optional<URI> uri = pastedLink();
-        if (uri.isEmpty()) {
+        if (password.isEmpty()) {
+            login.message("Escribe la contraseña.");
             return;
         }
-        if (!Links.extension(uri.get()).equals("flac")) {
-            fail("Solo se puede medir un FLAC: el AAC no tiene un MD5 con el que comparar.");
-            return;
-        }
-        stopListening();
-        busy(true);
-        clearResult();
-        worker.execute(() -> {
-            try {
-                Measure.Result r = Measure.run(http, mpv, uri.get(), text -> Platform.runLater(() -> status.setText(text)));
-                Platform.runLater(() -> showMeasurement(uri.get(), r));
-            } catch (IOException e) {
-                Platform.runLater(() -> fail("No se pudo medir: " + e.getMessage()));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } finally {
-                Platform.runLater(() -> busy(false));
-            }
+        login.busy(true);
+        inBackground(() -> sessions.login(address, password), session -> {
+            login.busy(false);
+            showMain(session);
+        }, e -> {
+            login.busy(false);
+            login.message(e instanceof IOException io ? Messages.login(address, io) : e.getMessage());
+            login.focus();
         });
     }
 
-    private void showMeasurement(URI uri, Measure.Result r) {
-        formats.setText("Original: " + r.original().describe() + ".\nmpv entrega: " + r.output().describe() + ".");
-        md5.setText(r.md5());
-        String result;
-        if (!r.original().hasMd5()) {
-            result = "El original no tiene MD5 en STREAMINFO: no hay con qué comparar.";
-        } else if (r.matches()) {
-            result = "Coincide con el MD5 del original.";
-        } else {
-            result = "NO coincide. Original: " + r.original().md5()
-                    + (r.allSamples() ? "" : ". Faltan o sobran muestras: " + r.samples() + " contadas")
-                    + (r.sameFormat() ? "" : ". mpv cambió la frecuencia o los canales");
-        }
-        verdict.setText(result);
-        status.setText("Medido.");
-        report("medir " + Links.safe(uri) + ": " + r.original().describe() + "; mpv entrega " + r.output().describe()
-                + "; MD5 " + r.md5() + "; original " + r.original().md5() + "; " + result, r.matches());
-    }
-
-    private void startListening() {
-        Optional<URI> uri = pastedLink();
-        if (uri.isEmpty()) {
-            return;
-        }
-        stopListening();
-        busy(true);
-        clearResult();
-        boolean exclusiveMode = exclusive.isSelected();
-        status.setText("Arrancando mpv…");
-        worker.execute(() -> {
-            try {
-                Listen started = Listen.start(mpv, uri.get(), exclusiveMode, new Listen.View() {
-                    @Override
-                    public void formats(Optional<AudioParams> decoded, Optional<AudioParams> output) {
-                        Platform.runLater(() -> showFormats(decoded, output));
-                    }
-
-                    @Override
-                    public void finished(String reason, Optional<IOException> error) {
-                        Platform.runLater(() -> listeningFinished(uri.get(), exclusiveMode, reason, error));
-                    }
-                });
-                Platform.runLater(() -> {
-                    listening = started;
-                    stop.setDisable(false);
-                    status.setText("Sonando " + Links.safe(uri.get()) + (exclusiveMode ? " en modo exclusivo." : " en modo compartido."));
-                });
-            } catch (IOException e) {
-                Platform.runLater(() -> {
-                    fail("No se pudo escuchar: " + e.getMessage());
-                    busy(false);
-                });
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+    private void logout() {
+        Sessions.Active closing = active;
+        main.busy(true);
+        inBackground(() -> sessions.logout(closing), warning -> {
+            main.busy(false);
+            active = null;
+            showLogin(Optional.of(closing.saved().server()), warning);
+        }, e -> {
+            main.busy(false);
+            main.message("No se pudo cerrar la sesión: " + e.getMessage());
         });
     }
 
-    private void showFormats(Optional<AudioParams> decoded, Optional<AudioParams> output) {
-        formats.setText("Decodificador: " + decoded.map(AudioParams::describe).orElse("—")
-                + ".\nA Windows: " + output.map(AudioParams::describe).orElse("—") + ".");
-        if (decoded.isPresent() && output.isPresent()) {
-            verdict.setText(decoded.equals(output)
-                    ? "Sin conversión: Windows recibe lo mismo que da el decodificador."
-                    : "Hay conversión antes de Windows.");
-        }
+    private void showLogin(Optional<String> server, Optional<String> notice) {
+        server.ifPresent(login::server);
+        login.message(notice.orElse(""));
+        scene.setRoot(login.root());
+        login.focus();
     }
 
-    private void listeningFinished(URI uri, boolean exclusiveMode, String reason, Optional<IOException> error) {
-        String formatsText = formats.getText().replace("\n", " ");
-        boolean ok = reason.equals("eof") && error.isEmpty() && verdict.getText().startsWith("Sin conversión");
-        status.setText(error.map(e -> "Error: " + e.getMessage()).orElse("Terminó (" + reason + ")."));
-        report("escuchar " + Links.safe(uri) + (exclusiveMode ? " (exclusivo)" : " (compartido)") + ": "
-                + formatsText + " " + verdict.getText() + " Terminó: " + reason
-                + error.map(e -> " (" + e.getMessage() + ")").orElse(""), ok);
-        stopListening();
+    private void showMain(Sessions.Active session) {
+        active = session;
+        main.server(session.saved().server());
+        main.message("");
+        scene.setRoot(main.root());
     }
 
-    private void stopListening() {
-        if (listening != null) {
+    /** Un texto y, si se puede reintentar, el botón para hacerlo. */
+    private static Parent notice(String text, Optional<Runnable> retry) {
+        Label label = new Label(text);
+        label.setWrapText(true);
+        VBox root = new VBox(10, label);
+        retry.ifPresent(action -> {
+            Button button = new Button("Reintentar");
+            button.setOnAction(e -> action.run());
+            root.getChildren().add(button);
+        });
+        root.setPadding(new Insets(16));
+        return root;
+    }
+
+    /**
+     * Hace {@code task} en el hilo de la red y vuelve al de JavaFX con el resultado o con el
+     * error. Los errores llegan aquí siempre: un hilo de fondo que muere en silencio deja la
+     * ventana esperando para siempre.
+     */
+    private <T> void inBackground(Callable<T> task, Consumer<T> done, Consumer<Throwable> failed) {
+        network.execute(() -> {
             try {
-                listening.close();
-            } catch (IOException e) {
-                fail("No se pudo cerrar mpv: " + e.getMessage());
+                T result = task.call();
+                Platform.runLater(() -> done.accept(result));
+            } catch (Exception e) {
+                Platform.runLater(() -> failed.accept(e));
+            } catch (Error e) {
+                // Se cuenta en la ventana y se deja seguir: un Error no se puede arreglar aquí.
+                Platform.runLater(() -> failed.accept(e));
+                throw e;
             }
-            listening = null;
-        }
-        stop.setDisable(true);
-        busy(false);
-    }
-
-    private void busy(boolean busy) {
-        listen.setDisable(busy);
-        measure.setDisable(busy);
-    }
-
-    private void clearResult() {
-        formats.setText("");
-        md5.setText("");
-        verdict.setText("");
-    }
-
-    private void fail(String message) {
-        status.setText(message);
-        System.err.println(message);
-        if (exitWhenDone) {
-            exit(1);
-        }
-    }
-
-    private void report(String line, boolean ok) {
-        System.out.println(line);
-        if (exitWhenDone) {
-            exit(ok ? 0 : 1);
-        }
+        });
     }
 
     private void exit(int code) {
