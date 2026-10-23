@@ -69,13 +69,14 @@ final class Mpv implements AutoCloseable {
     private final AtomicInteger requestIds = new AtomicInteger();
     private final Map<Integer, CompletableFuture<JsonElement>> pending = new ConcurrentHashMap<>();
     private final Object writeLock = new Object();
+    private final Thread reader;
     private volatile boolean closing;
 
     private Mpv(Process process, AsynchronousFileChannel pipe, Listener listener) {
         this.process = process;
         this.pipe = pipe;
         this.listener = listener;
-        Thread reader = new Thread(this::readLoop, "mpv-ipc");
+        reader = new Thread(this::readLoop, "mpv-ipc");
         reader.setDaemon(true);
         reader.start();
     }
@@ -126,6 +127,10 @@ final class Mpv implements AutoCloseable {
 
     /** Manda un comando y espera la respuesta de mpv: lo que devuelve en {@code data}. */
     JsonElement command(Object... args) throws IOException, InterruptedException {
+        if (Thread.currentThread() == reader) {
+            // Se quedaría esperando 5 s una respuesta que solo puede leer él.
+            throw new IllegalStateException("no se puede mandar un comando a mpv desde su Listener");
+        }
         int id = requestIds.incrementAndGet();
         JsonArray command = new JsonArray();
         for (Object arg : args) {
@@ -160,6 +165,11 @@ final class Mpv implements AutoCloseable {
     /** Carga el enlace por la tubería, para que no salga en la línea de órdenes. */
     void load(URI link) throws IOException, InterruptedException {
         command("loadfile", link.toString());
+    }
+
+    /** El proceso de mpv, para que las pruebas puedan matarlo. */
+    ProcessHandle process() {
+        return process.toHandle();
     }
 
     /** Cierra mpv: le pide que salga y, si no lo hace a tiempo, lo mata. */
