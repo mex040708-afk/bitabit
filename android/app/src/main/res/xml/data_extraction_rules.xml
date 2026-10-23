@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12 y posteriores (ADR-021): el token de la sesión no viaja ni a la nube ni a
+     otro dispositivo. Además, su clave del Keystore no se puede copiar, así que en otro
+     dispositivo no se podría descifrar. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="bitabit_session.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="bitabit_session.xml" />
+    </device-transfer>
+</data-extraction-rules>

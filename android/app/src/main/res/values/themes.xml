@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Sin barra de acción: desde targetSdk 35 la app se dibuja de borde a borde y cada
+         pantalla deja sitio a las barras del sistema con fitsSystemWindows. -->
+    <style name="Theme.Bitabit" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>

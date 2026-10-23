@@ -1,9 +1,16 @@
 [versions]
 agp = "9.3.3"
+appcompat = "1.8.0"
+# appcompat 1.8.0 solo trae la 1.5.4; la app usa Fragments directamente y pide la estable actual.
+fragment = "1.9.1"
 media3 = "1.11.1"
 junit = "4.13.2"
 
 [libraries]
+# Sin versión: settings.gradle.kts la sustituye por el código de ../core (ADR-020).
+bitabit-core = { module = "io.github.mex040708afk.bitabit:core" }
+appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+fragment = { group = "androidx.fragment", name = "fragment", version.ref = "fragment" }
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
