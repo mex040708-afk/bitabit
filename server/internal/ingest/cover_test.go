@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -156,5 +161,261 @@ func TestImportKeepsAStrayCover(t *testing.T) {
 	}
 	if !exists(t, e.path("entrada", "a", "02.flac")) {
 		t.Error("la fuente se borró de la entrada")
+	}
+}
+
+// Recover avisa de las carátulas que ningún álbum referencia y las devuelve, sin
+// borrarlas mientras no pase el plazo de gracia. La carátula buena de un álbum no
+// cuenta.
+func TestRecoverReportsOrphanCovers(t *testing.T) {
+	e := newImportEnv(t)
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	withCover := albumIDOf(t, e.pool, e.importOK(t, "a/01.flac", ingest.Imported).TrackID)
+	e.put(t, "b/01.flac", "44100", "-c:a", "flac", "-metadata", "album=Otro")
+	without := albumIDOf(t, e.pool, e.importOK(t, "b/01.flac", ingest.Imported).TrackID)
+	if withCover == without {
+		t.Fatal("las dos pistas cayeron en el mismo álbum")
+	}
+
+	good := e.path("biblioteca", "covers", fmt.Sprintf("%d.jpg", withCover))
+	blocking := fmt.Sprintf("%d.jpg", without) // el caso de ADR-015: álbum sin cover_ext
+	orphans := []string{
+		e.path("biblioteca", "covers", blocking),
+		e.path("biblioteca", "covers", fmt.Sprintf("%d.png", withCover)),
+		e.path("biblioteca", "covers", "999999.jpg"),
+		e.path("biblioteca", "covers", "nota.txt"),
+		e.path("biblioteca", "covers", fmt.Sprintf("+%d.jpg", withCover)),
+	}
+	for _, p := range orphans {
+		if err := os.WriteFile(p, []byte("resto de un corte"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var logs bytes.Buffer
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := im.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	slices.Sort(orphans)
+	if !slices.Equal(got, orphans) {
+		t.Errorf("huérfanos %v, want %v", got, orphans)
+	}
+	for _, p := range append(orphans, good) {
+		if !exists(t, p) {
+			t.Errorf("Recover borró %s", p)
+		}
+	}
+	want := fmt.Sprintf("level=WARN msg=\"carátula que ningún álbum referencia; se borrará pasado el plazo de gracia, y hasta entonces puede bloquear las pistas nuevas del álbum\" álbum=%d archivo=covers/%s", without, blocking)
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("falta el aviso %q en el registro:\n%s", want, logs.String())
+	}
+}
+
+// Pasado el plazo de gracia, Recover borra las carátulas sin dueño con forma de
+// carátula. Lo que no lo tiene (nota.txt) y la carátula de un álbum se quedan.
+func TestRecoverRemovesOldOrphanCovers(t *testing.T) {
+	e := newImportEnv(t)
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	withCover := albumIDOf(t, e.pool, e.importOK(t, "a/01.flac", ingest.Imported).TrackID)
+	e.put(t, "b/01.flac", "44100", "-c:a", "flac", "-metadata", "album=Otro")
+	without := albumIDOf(t, e.pool, e.importOK(t, "b/01.flac", ingest.Imported).TrackID)
+
+	good := e.path("biblioteca", "covers", fmt.Sprintf("%d.jpg", withCover))
+	old := e.path("biblioteca", "covers", fmt.Sprintf("%d.jpg", without))
+	young := e.path("biblioteca", "covers", fmt.Sprintf("%d.png", without))
+	note := e.path("biblioteca", "covers", "nota.txt")
+	for _, p := range []string{old, young, note} {
+		if err := os.WriteFile(p, []byte("resto de un corte"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// La carátula buena también es antigua: que sea vieja no basta, tiene que no tener dueño.
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	for _, p := range []string{good, old, note} {
+		if err := os.Chtimes(p, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var logs bytes.Buffer
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := im.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	want := []string{young, note}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("huérfanos que quedan %v, want %v", got, want)
+	}
+	if exists(t, old) {
+		t.Error("la carátula sin dueño y vieja no se borró")
+	}
+	for _, p := range []string{good, young, note} {
+		if !exists(t, p) {
+			t.Errorf("Recover borró %s", p)
+		}
+	}
+	if !strings.Contains(logs.String(), "carátula sin dueño borrada") {
+		t.Errorf("falta el aviso del borrado en el registro: %s", logs.String())
+	}
+}
+
+// Solo se borra lo que el importador pudo escribir: ID positivo y jpg o png. Un
+// archivo viejo con otro nombre, una carpeta o un enlace simbólico se quedan.
+func TestRecoverOnlyRemovesFilesShapedLikeCovers(t *testing.T) {
+	e := newImportEnv(t)
+	covers := e.path("biblioteca", "covers")
+	stay := []string{"12.txt", "12.jpg.bak", "-5.jpg", "0.jpg", "012.jpg", "12-256.png"}
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	for _, name := range stay {
+		p := e.path("biblioteca", "covers", name)
+		if err := os.WriteFile(p, []byte("no es nuestro"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(e.path("biblioteca", "covers", "777.jpg"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stay = append(stay, "777.jpg")
+	if err := os.Symlink("12.txt", e.path("biblioteca", "covers", "778.jpg")); err == nil {
+		stay = append(stay, "778.jpg")
+	}
+
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := im.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	for _, name := range stay {
+		if _, err := os.Lstat(covers + "/" + name); err != nil {
+			t.Errorf("Recover borró %s: %v", name, err)
+		}
+	}
+}
+
+// Si una carátula sin dueño no se puede borrar, el servidor arranca igual: Recover
+// avisa y la deja entre los huérfanos.
+func TestRecoverSurvivesAnOrphanCoverItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root puede borrar en una carpeta de solo lectura")
+	}
+	e := newImportEnv(t)
+	// Un álbum con carátula, para que la base de datos no parezca equivocada.
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	e.importOK(t, "a/01.flac", ingest.Imported)
+	old := e.path("biblioteca", "covers", "4242.jpg")
+	if err := os.WriteFile(old, []byte("resto de un corte"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	if err := os.Chtimes(old, longAgo, longAgo); err != nil {
+		t.Fatal(err)
+	}
+	covers := e.path("biblioteca", "covers")
+	if err := os.Chmod(covers, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// Sin permisos de escritura, t.TempDir no podría borrar la carpeta al acabar.
+	t.Cleanup(func() {
+		if err := os.Chmod(covers, 0o750); err != nil {
+			t.Error(err)
+		}
+	})
+
+	var logs bytes.Buffer
+	im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := im.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover: %v; un fallo al borrar no debe impedir el arranque", err)
+	}
+	if !slices.Equal(got, []string{old}) {
+		t.Errorf("huérfanos %v, want [%s]", got, old)
+	}
+	if !strings.Contains(logs.String(), "no se pudo borrar una carátula sin dueño") {
+		t.Errorf("falta el aviso en el registro: %s", logs.String())
+	}
+}
+
+// La salvaguarda: con una base de datos que no tiene ninguna carátula mientras en
+// disco hay, no se borra nada aunque los archivos sean viejos; y tampoco si habría que
+// borrar más de la mitad y más de 20.
+func TestRecoverDoesNotDeleteWhenTheDatabaseLooksWrong(t *testing.T) {
+	e := newImportEnv(t)
+	longAgo := time.Now().Add(-2 * ingest.OrphanCoverGrace)
+	old := func(name string) string {
+		p := e.path("biblioteca", "covers", name)
+		if err := os.WriteFile(p, []byte("carátula de otra biblioteca"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, longAgo, longAgo); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	recover := func() {
+		t.Helper()
+		im, err := ingest.NewImporter(e.dir, e.pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := im.Recover(context.Background()); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+	}
+
+	// 1. La base no tiene ninguna carátula y en disco hay una (vieja).
+	lonely := old("500.jpg")
+	recover()
+	if !exists(t, lonely) {
+		t.Fatal("se borró una carátula con una base de datos sin ninguna carátula")
+	}
+
+	// 2. Hay una carátula buena, pero habría que borrar 25 de 26: más de la mitad y más de 20.
+	pic, _ := picture(t, t.TempDir(), "cover.jpg")
+	e.put(t, "a/01.flac", "44100", embedArgs(pic)...)
+	e.importOK(t, "a/01.flac", ingest.Imported)
+	var many []string
+	for i := 0; i < 24; i++ {
+		many = append(many, old(fmt.Sprintf("%d.jpg", 1000+i)))
+	}
+	recover()
+	for _, p := range append(many, lonely) {
+		if !exists(t, p) {
+			t.Fatalf("se borró %s con una base de datos que parece equivocada", p)
+		}
+	}
+
+	// 3. Con pocas sin dueño frente a las buenas, sí se borra (lo normal).
+	for _, p := range many[1:] {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(lonely); err != nil {
+		t.Fatal(err)
+	}
+	recover()
+	if exists(t, many[0]) {
+		t.Error("una sola carátula sin dueño y vieja, con la base en orden, debía borrarse")
 	}
 }
