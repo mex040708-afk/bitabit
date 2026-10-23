@@ -35,6 +35,13 @@ public final class App extends Application {
         return t;
     });
 
+    /** Las carátulas van aparte: una lenta no tiene que hacer esperar al resto de las llamadas. */
+    private final ExecutorService coverPool = Executors.newFixedThreadPool(3, task -> {
+        Thread t = new Thread(task, "caratulas");
+        t.setDaemon(true);
+        return t;
+    });
+
     private final Sessions sessions = new Sessions(new SessionStore(SessionStore.defaultDir()),
             Sessions.deviceName(System.getenv()));
 
@@ -55,7 +62,7 @@ public final class App extends Application {
         Map<String, String> named = getParameters().getNamed();
         boolean exitWhenDone = getParameters().getRaw().contains("--salir");
         diagnostics = new DiagnosticsView(exitWhenDone, this::exit);
-        scene = new Scene(new VBox(), 640, 480);
+        scene = new Scene(new VBox(), 1000, 680);
         stage.setTitle("Bitabit");
         stage.setScene(scene);
 
@@ -78,6 +85,7 @@ public final class App extends Application {
     public void stop() {
         diagnostics.close();
         network.shutdownNow();
+        coverPool.shutdownNow();
     }
 
     private void resume() {
@@ -138,9 +146,27 @@ public final class App extends Application {
 
     private void showMain(Sessions.Active session) {
         active = session;
-        main.server(session.saved().server());
-        main.message("");
+        Catalog catalog = new Catalog(session.client(), session.saved().server());
+        Covers covers = new Covers(catalog, this::inCovers);
+        main.open(session.saved().server(), new CatalogView(catalog, this::inBackground, covers,
+                () -> sessionExpired(session)));
         scene.setRoot(main.root());
+    }
+
+    /** El servidor ya no acepta el token: se olvida la sesión y se vuelve al login. */
+    private void sessionExpired(Sessions.Active expired) {
+        if (active != expired) {
+            return;
+        }
+        active = null;
+        String server = expired.saved().server();
+        String notice = "La sesión ha caducado en " + server + ". Vuelve a iniciar sesión.";
+        try {
+            sessions.expire(expired);
+        } catch (IOException e) {
+            notice += " No se pudo borrar la sesión guardada: " + e.getMessage();
+        }
+        showLogin(Optional.of(server), Optional.of(notice));
     }
 
     /** Un texto y, si se puede reintentar, el botón para hacerlo. */
@@ -163,7 +189,16 @@ public final class App extends Application {
      * ventana esperando para siempre.
      */
     private <T> void inBackground(Callable<T> task, Consumer<T> done, Consumer<Throwable> failed) {
-        network.execute(() -> {
+        inBackground(network, task, done, failed);
+    }
+
+    private <T> void inCovers(Callable<T> task, Consumer<T> done, Consumer<Throwable> failed) {
+        inBackground(coverPool, task, done, failed);
+    }
+
+    private static <T> void inBackground(ExecutorService executor, Callable<T> task, Consumer<T> done,
+            Consumer<Throwable> failed) {
+        executor.execute(() -> {
             try {
                 T result = task.call();
                 Platform.runLater(() -> done.accept(result));
