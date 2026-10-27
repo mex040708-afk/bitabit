@@ -1,6 +1,22 @@
 # Bitabit para escritorio
 
-Prototipo de la fase 1, para Windows. JavaFX pinta la ventana y mpv reproduce el audio, controlado por su tubería JSON. Con un enlace firmado del servidor se puede:
+App de Windows. JavaFX pinta la ventana, el módulo `core` (`../core`) habla con la API v1 del servidor y mpv reproduce el audio, controlado por su tubería JSON.
+
+## Sesión
+
+Al arrancar pide la dirección del servidor (`http://host:puerto`) y la contraseña de la cuenta. El equipo sale en la lista de sesiones con su nombre (`COMPUTERNAME`), o como «Escritorio».
+
+La contraseña no se guarda nunca. Se guardan solo el servidor, el id de la sesión y su token, en `%APPDATA%\Bitabit\session.json` (ADR-025). Al arrancar otra vez, la app comprueba la sesión con el servidor:
+
+- si ya no vale, borra el archivo y pide la contraseña;
+- si el servidor no responde, lo dice y ofrece reintentar, sin borrar nada;
+- si el archivo está mal formado, lo borra y explica por qué.
+
+**Cerrar sesión** la cierra en el servidor y borra el archivo; si el servidor no responde, el archivo se borra igual y la app avisa.
+
+## Diagnóstico
+
+Debajo de la sesión sigue el panel del prototipo de la fase 1. Con un enlace firmado del servidor se puede:
 
 - **Escuchar:** suena por la tarjeta. Enseña el formato que da el decodificador y el que mpv manda a Windows, y dice si son iguales. En modo exclusivo (WASAPI) tienen que serlo; en modo compartido Windows lo pasa todo a su formato de mezcla.
 - **Medir:** mpv decodifica la pista sin sonar (`--ao=pcm`) y la app calcula el MD5 de lo que habría mandado a la tarjeta. Lo compara con el MD5 de STREAMINFO del original. Solo con FLAC.
@@ -24,6 +40,7 @@ Los avisos de mpv llegan desde el hilo que lee la tubería: la interfaz los pasa
   ```
 
 - Un JDK 21, por ejemplo el que trae Android Studio.
+- El directorio `core/` al lado de `desktop/`, como en el repositorio: el build lo incluye con `includeBuild("../core")` (ADR-020) y lo compila solo.
 
 ## Compilar y arrancar
 
@@ -34,24 +51,26 @@ gradle wrapper --gradle-version 9.5.0 --distribution-type bin \
   --gradle-distribution-sha256-sum 553c78f50dafcd54d65b9a444649057857469edf836431389695608536d6b746
 ```
 
-Después:
+Después (`core` usa el mismo Gradle 9.5, y desde `desktop/` no le hace falta su propio wrapper):
 
 ```bash
 ./gradlew build
 ./gradlew run
 ```
 
-Con `BITABIT_MPV` puesta, `build` pasa también las pruebas que hablan con un mpv de verdad. Las del `Player` necesitan además FFmpeg en el `PATH`: generan un tono en una carpeta temporal y lo reproducen con `--ao=null`, sin que suene la tarjeta.
+Con `BITABIT_MPV` puesta, `build` pasa también las pruebas que hablan con un mpv de verdad. Las del `Player` necesitan además FFmpeg en el `PATH`: generan un tono en una carpeta temporal y lo reproducen con `--ao=null`, sin que suene la tarjeta. Las de la sesión usan un servidor simulado (`com.sun.net.httpserver`, del JDK) y una carpeta temporal en lugar de `%APPDATA%`.
+
+OkHttp y Okio, que trae `core`, son módulos automáticos y no declaran que necesitan `kotlin.stdlib`; por eso la app arranca con `--add-modules=kotlin.stdlib` (está en `build.gradle.kts`, en `run` y en los scripts de la distribución).
 
 ## Probar
 
 1. Arrancar el servidor y pedir un enlace: `bitabit link <pista>`.
-2. Pegarlo en la ventana y pulsar **Medir** o **Escuchar**.
+2. Iniciar sesión, pegarlo en el panel de diagnóstico y pulsar **Medir** o **Escuchar**.
 
-Para las pruebas automáticas, el enlace se puede leer de un archivo, para que no salga en la lista de procesos:
+Para las pruebas automáticas, sin iniciar sesión, el enlace se puede leer de un archivo, para que no salga en la lista de procesos:
 
 ```bash
 ./gradlew run --args="--enlace-archivo=enlace.txt --accion=medir --salir"
 ```
 
-`--accion` puede ser `medir` o `escuchar`, y `--exclusivo=no` escucha en modo compartido. Con `--salir`, la app se cierra al terminar con el código 0 si todo cuadra y 1 si no. El resultado sale también por la salida estándar, sin la firma del enlace.
+Con `--enlace-archivo` o `--accion`, la app abre directamente el panel de diagnóstico, sin pedir sesión. `--accion` puede ser `medir` o `escuchar`, y `--exclusivo=no` escucha en modo compartido. Con `--salir`, la app se cierra al terminar con el código 0 si todo cuadra y 1 si no. El resultado sale también por la salida estándar, sin la firma del enlace.
