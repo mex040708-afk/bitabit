@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -15,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,6 +37,15 @@ const (
 	workDirPrefix  = ".tmp-"
 	errorNoteExt   = ".error.txt"
 	maxFailedTries = 1000
+
+	// OrphanCoverGrace es lo que tiene que llevar una carátula sin dueño en covers/
+	// para que Recover la borre. Es mucho más de lo que dura cualquier importación
+	// (ADR-015): una más joven puede ser de una importación que aún no ha confirmado.
+	OrphanCoverGrace = 24 * time.Hour
+
+	// maxOrphanCoverDeletes es lo más que Recover borra de golpe si eso es más de la
+	// mitad de las carátulas (ver safeToDeleteCovers).
+	maxOrphanCoverDeletes = 20
 )
 
 // Outcome es lo que pasó con un archivo de la entrada.
@@ -69,27 +80,33 @@ type Result struct {
 // a fallidos/ si no valen. Importa de uno en uno: no admite llamadas
 // simultáneas.
 type Importer struct {
-	inbox   string
-	library string
-	failed  string
-	pool    *pgxpool.Pool
-	log     *slog.Logger
+	inbox     string
+	library   string
+	failed    string
+	dataDir   string
+	inboxRoot *os.Root // entrada/ aparte: seguir un enlace simbólico no puede salir de ella ni llegar a biblioteca/ (ADR-032)
+	data      *os.Root // la carpeta de datos: de aquí sale todo acceso a entrada/ (ADR-032)
+	pool      *pgxpool.Pool
+	log       *slog.Logger
+	now       func() time.Time // los tests lo mueven para no esperar 24 horas
 }
 
 // NewImporter prepara la importación en dataDir, que debe tener entrada/,
 // biblioteca/ y fallidos/ (las crea setup-server.sh). No las crea él: si faltan,
 // lo más probable es que BITABIT_DATA_DIR apunte a otro sitio. Sí crea
-// biblioteca/orig y biblioteca/aac.
+// biblioteca/orig, biblioteca/aac y biblioteca/covers.
 func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importer, error) {
 	if !filepath.IsAbs(dataDir) {
 		return nil, fmt.Errorf("importación: la carpeta de datos debe ser una ruta absoluta: %q", dataDir)
 	}
 	im := &Importer{
+		dataDir: dataDir,
 		inbox:   filepath.Join(dataDir, "entrada"),
 		library: filepath.Join(dataDir, "biblioteca"),
 		failed:  filepath.Join(dataDir, "fallidos"),
 		pool:    pool,
 		log:     log,
+		now:     time.Now,
 	}
 	for _, dir := range []string{im.inbox, im.library, im.failed} {
 		fi, err := os.Stat(dir)
@@ -100,19 +117,36 @@ func NewImporter(dataDir string, pool *pgxpool.Pool, log *slog.Logger) (*Importe
 			return nil, fmt.Errorf("importación: %s no es una carpeta", dir)
 		}
 	}
-	for _, dir := range []string{im.versionDir(db.QualityOriginal), im.versionDir(db.QualityAAC256)} {
-		if err := os.MkdirAll(dir, dirPerm); err != nil {
+	data, err := os.OpenRoot(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("importación: %w", err)
+	}
+	im.data = data
+	inboxRoot, err := data.OpenRoot("entrada")
+	if err != nil {
+		data.Close()
+		return nil, fmt.Errorf("importación: %w", err)
+	}
+	im.inboxRoot = inboxRoot
+	for _, dir := range []string{im.versionDir(db.QualityOriginal), im.versionDir(db.QualityAAC256), im.coverDir()} {
+		if err := im.mkdirAll(dir); err != nil {
 			return nil, fmt.Errorf("importación: crear %s: %w", dir, err)
 		}
 	}
 	return im, nil
 }
 
+// Close suelta la carpeta de datos abierta. Solo lee de ella al cerrar, así que
+// no puede perder datos.
+func (im *Importer) Close() error {
+	return errors.Join(im.inboxRoot.Close(), im.data.Close())
+}
+
 // Run importa lo que esté listo en la entrada cada interval, hasta que se
 // cancele ctx. Los fallos del sistema se registran y el archivo se reintenta en
 // la siguiente pasada.
 func (im *Importer) Run(ctx context.Context, interval, quiet time.Duration) error {
-	inbox := NewInbox(im.inbox, quiet)
+	inbox := NewInboxFS(im.inboxRoot.FS(), quiet)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -154,27 +188,6 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 	if !filepath.IsLocal(filepath.FromSlash(rel)) {
 		return Result{}, fmt.Errorf("importar: ruta fuera de la entrada: %q", rel)
 	}
-	src := filepath.Join(im.inbox, filepath.FromSlash(rel))
-
-	sum, _, err := hashFile(src)
-	if err != nil {
-		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
-	}
-	id, found, err := db.TrackIDBySource(ctx, im.pool, sum)
-	if err != nil {
-		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
-	}
-	if found {
-		return im.fail(rel, src, Duplicate, id, fmt.Sprintf("ya importado como pista %d", id))
-	}
-
-	info, err := Probe(ctx, src)
-	if errors.Is(err, ErrUnreadable) {
-		return im.fail(rel, src, Failed, 0, err.Error())
-	}
-	if err != nil {
-		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
-	}
 
 	work, err := os.MkdirTemp(im.library, workDirPrefix)
 	if err != nil {
@@ -186,32 +199,65 @@ func (im *Importer) Import(ctx context.Context, rel string) (res Result, err err
 		}
 	}()
 
-	v, err := BuildVersions(ctx, src, info, work)
+	// La fuente se abre una sola vez, con el Root, y se copia a la carpeta de
+	// trabajo calculando su hash: la sonda, las versiones y la carátula leen esos
+	// mismos bytes, y ningún proceso externo recibe un nombre de entrada/ que
+	// alguien pueda cambiar por un enlace simbólico (ADR-032).
+	copied, sum, err := im.copySource(rel, work, maxSourceBytes)
+	var unsafe *unsafeSourceError
+	var tooBig *tooBigError
+	switch {
+	case errors.As(err, &tooBig):
+		return im.failTooBig(rel, tooBig)
+	case errors.As(err, &unsafe):
+		return im.failUnsafe(rel, unsafe.Error())
+	}
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
+	}
+	id, found, err := db.TrackIDBySource(ctx, im.pool, sum)
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
+	}
+	if found {
+		return im.failCopied(rel, copied, Duplicate, id, fmt.Sprintf("ya importado como pista %d", id))
+	}
+
+	info, err := Probe(ctx, copied)
 	if errors.Is(err, ErrUnreadable) {
-		return im.fail(rel, src, Failed, 0, err.Error())
+		return im.failCopied(rel, copied, Failed, 0, err.Error())
 	}
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
 
-	id, err = im.store(ctx, rel, sum, info, v)
+	v, err := BuildVersions(ctx, copied, info, work)
+	if errors.Is(err, ErrUnreadable) {
+		return im.failCopied(rel, copied, Failed, 0, err.Error())
+	}
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
+	}
+
+	cover, err := im.stageCover(ctx, rel, copied, work)
+	if err != nil {
+		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
+	}
+
+	id, err = im.store(ctx, rel, sum, info, v, cover)
 	if err != nil {
 		return Result{}, fmt.Errorf("importar %s: %w", rel, err)
 	}
 	// La pista ya está guardada. Si no se puede borrar la fuente, en la próxima
 	// pasada saldrá como repetida y acabará en fallidos/.
-	if err := os.Remove(src); err != nil {
-		im.log.Error("importado, pero no se pudo borrar de la entrada", "archivo", rel, "pista", id, "error", err)
-	} else {
-		im.removeEmptyDirs(filepath.Dir(src))
-	}
+	im.removeSource(rel, id)
 	return Result{Outcome: Imported, TrackID: id}, nil
 }
 
-// store guarda la pista y coloca sus versiones. Las versiones se renombran a su
+// store guarda la pista y coloca sus versiones y su carátula. Se renombran a su
 // sitio dentro de la transacción y antes de confirmarla: si la confirmación
 // falla, se borran.
-func (im *Importer) store(ctx context.Context, rel string, sum [32]byte, info Info, v Versions) (id int64, err error) {
+func (im *Importer) store(ctx context.Context, rel string, sum [32]byte, info Info, v Versions, cover Cover) (id int64, err error) {
 	files, err := trackFiles(info, v)
 	if err != nil {
 		return 0, err
@@ -233,11 +279,14 @@ func (im *Importer) store(ctx context.Context, rel string, sum [32]byte, info In
 	}
 	placed, err := im.place(id, v)
 	if err == nil {
+		placed, err = im.placeCover(ctx, tx, id, cover, placed)
+	}
+	if err == nil {
 		err = tx.Commit(ctx)
 	}
 	if err != nil {
 		for _, p := range placed {
-			if rerr := os.Remove(p); rerr != nil {
+			if rerr := im.remove(p); rerr != nil {
 				err = errors.Join(err, fmt.Errorf("retirar %s: %w", p, rerr))
 			}
 		}
@@ -253,21 +302,27 @@ func (im *Importer) place(id int64, v Versions) ([]string, error) {
 	if v.AAC != "" {
 		moves = append(moves, [2]string{v.AAC, im.versionPath(db.QualityAAC256, id, "m4a")})
 	}
+	return im.placeAll(moves)
+}
+
+// placeAll mueve cada origen a su destino y devuelve los destinos que llegó a
+// colocar. Un destino que ya existe no se pisa: o la base de datos no es la de
+// esta biblioteca, o un corte dejó una carátula sin dueño (ADR-015). En los dos
+// casos, mejor parar.
+func (im *Importer) placeAll(moves [][2]string) ([]string, error) {
 	var placed []string
 	for _, m := range moves {
 		src, dst := m[0], m[1]
-		// Rename pisaría sin avisar. Un archivo con este ID solo puede existir si
-		// la base de datos no es la de esta biblioteca: mejor parar.
-		if _, err := os.Lstat(dst); err == nil {
+		if _, err := im.lstat(dst); err == nil {
 			return placed, fmt.Errorf("ya existe %s: ¿la base de datos no corresponde a esta biblioteca?", dst)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return placed, fmt.Errorf("comprobar %s: %w", dst, err)
 		}
-		if err := os.Rename(src, dst); err != nil {
+		if err := im.rename(src, dst); err != nil {
 			return placed, fmt.Errorf("colocar %s: %w", dst, err)
 		}
 		placed = append(placed, dst)
-		if err := syncDir(filepath.Dir(dst)); err != nil {
+		if err := im.syncDir(filepath.Dir(dst)); err != nil {
 			return placed, err
 		}
 	}
@@ -343,25 +398,91 @@ func newTrack(rel string, sum [32]byte, info Info) db.NewTrack {
 
 // fail mueve la fuente a fallidos/ con la misma ruta relativa y deja al lado una
 // nota con el motivo.
-func (im *Importer) fail(rel, src string, outcome Outcome, id int64, reason string) (Result, error) {
+func (im *Importer) failCopied(rel, copied string, outcome Outcome, id int64, reason string) (Result, error) {
 	dst, err := im.failedPath(rel)
 	if err != nil {
 		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
+	if err := im.mkdirAll(filepath.Dir(dst)); err != nil {
 		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
 	}
-	if err := os.Rename(src, dst); err != nil {
+	// Lo que va a fallidos/ es la copia que se leyó y se hasheó, no el nombre de
+	// entrada/, que alguien pudo cambiar mientras tanto; de entrada/ solo se borra.
+	if err := im.rename(copied, dst); err != nil {
 		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
 	}
+	im.writeFailureNote(rel, dst, reason)
+	im.removeSource(rel, 0)
+	return Result{Outcome: outcome, TrackID: id, Reason: reason}, nil
+}
+
+// failTooBig manda a fallidos/ un archivo que pasa del tope sin leerlo: no hay copia
+// que mover, así que se renombra el propio archivo. Antes se comprueba por el Root de
+// entrada/ que es un archivo regular de verdad; entre esa comprobación y el
+// renombrado queda una ventana mínima en la que alguien con escritura en entrada/
+// podría cambiarlo por un enlace dentro de la carpeta de datos. Lo peor que pasa es
+// que se mueva a fallidos/ un archivo de la biblioteca: no se borra ni se lee nada.
+func (im *Importer) failTooBig(rel string, tb *tooBigError) (Result, error) {
+	reason := tb.Error()
+	info, err := im.inboxRoot.Lstat(filepath.FromSlash(rel))
+	if err != nil || !info.Mode().IsRegular() {
+		return im.failUnsafe(rel, reason)
+	}
+	dst, err := im.failedPath(rel)
+	if err != nil {
+		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
+	}
+	if err := im.mkdirAll(filepath.Dir(dst)); err != nil {
+		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
+	}
+	if err := im.rename(filepath.Join(im.inbox, filepath.FromSlash(rel)), dst); err != nil {
+		return Result{}, fmt.Errorf("mover %s a fallidos/: %w", rel, err)
+	}
+	im.writeFailureNote(rel, dst, reason)
+	im.removeEmptyDirs(path.Dir(rel))
+	return Result{Outcome: Failed, Reason: reason}, nil
+}
+
+// failUnsafe registra un archivo que no se puede abrir con seguridad: no se lee ni se
+// mueve. Si es un enlace simbólico se borra el propio enlace (nunca su destino) para
+// que no se vuelva a intentar; cualquier otra cosa se deja donde está.
+func (im *Importer) failUnsafe(rel, reason string) (Result, error) {
+	dst, err := im.failedPath(rel)
+	if err != nil {
+		return Result{}, fmt.Errorf("registrar %s en fallidos/: %w", rel, err)
+	}
+	if err := im.mkdirAll(filepath.Dir(dst)); err != nil {
+		return Result{}, fmt.Errorf("registrar %s en fallidos/: %w", rel, err)
+	}
+	im.writeFailureNote(rel, dst, reason)
+	if info, err := im.inboxRoot.Lstat(filepath.FromSlash(rel)); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		if err := im.inboxRoot.Remove(filepath.FromSlash(rel)); err != nil {
+			im.log.Error("no se pudo borrar el enlace de la entrada", "archivo", rel, "error", err)
+		}
+		im.removeEmptyDirs(path.Dir(rel))
+	}
+	return Result{Outcome: Failed, Reason: reason}, nil
+}
+
+// writeFailureNote deja junto a dst la nota con el motivo.
+func (im *Importer) writeFailureNote(rel, dst, reason string) {
 	note := fmt.Sprintf("Archivo: %s\nFecha: %s\nMotivo: %s\n", rel, time.Now().Format(time.RFC3339), reason)
-	// El archivo ya está en fallidos/: sin la nota se ve igual, así que basta
-	// con registrarlo.
-	if err := os.WriteFile(dst+errorNoteExt, []byte(note), filePerm); err != nil {
+	// El archivo ya está en fallidos/: sin la nota se ve igual, así que basta con
+	// registrarlo.
+	if err := im.writeFile(dst+errorNoteExt, []byte(note)); err != nil {
 		im.log.Error("no se pudo escribir la nota del fallo", "archivo", dst, "error", err)
 	}
-	im.removeEmptyDirs(filepath.Dir(src))
-	return Result{Outcome: outcome, TrackID: id, Reason: reason}, nil
+}
+
+// removeSource borra la fuente de entrada/ por su Root, y las carpetas que queden
+// vacías. Si no se puede, en la próxima pasada saldrá como repetida y acabará en
+// fallidos/.
+func (im *Importer) removeSource(rel string, track int64) {
+	if err := im.inboxRoot.Remove(filepath.FromSlash(rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		im.log.Error("no se pudo borrar de la entrada", "archivo", rel, "pista", track, "error", err)
+		return
+	}
+	im.removeEmptyDirs(path.Dir(rel))
 }
 
 // failedPath busca en fallidos/ un nombre libre para rel, sin pisar ni el
@@ -375,7 +496,7 @@ func (im *Importer) failedPath(rel string) (string, error) {
 		if n > 1 {
 			candidate = stem + " (" + strconv.Itoa(n) + ")" + ext
 		}
-		free, err := notExists(candidate, candidate+errorNoteExt)
+		free, err := im.notExists(candidate, candidate+errorNoteExt)
 		if err != nil {
 			return "", err
 		}
@@ -386,9 +507,9 @@ func (im *Importer) failedPath(rel string) (string, error) {
 	return "", fmt.Errorf("hay más de %d archivos llamados %s", maxFailedTries, rel)
 }
 
-func notExists(paths ...string) (bool, error) {
+func (im *Importer) notExists(paths ...string) (bool, error) {
 	for _, p := range paths {
-		_, err := os.Lstat(p)
+		_, err := im.lstat(p)
 		if err == nil {
 			return false, nil
 		}
@@ -402,36 +523,43 @@ func notExists(paths ...string) (bool, error) {
 // removeEmptyDirs borra dir y sus padres mientras estén vacíos, sin llegar a
 // borrar entrada/. Lo que no es audio se queda, y con ello su carpeta.
 func (im *Importer) removeEmptyDirs(dir string) {
-	for dir != im.inbox && strings.HasPrefix(dir, im.inbox+string(filepath.Separator)) {
-		entries, err := os.ReadDir(dir)
+	for dir != "." && dir != "" && dir != "/" {
+		f, err := im.inboxRoot.Open(filepath.FromSlash(dir))
 		if err != nil {
+			im.log.Error("no se pudo mirar una carpeta de la entrada", "carpeta", dir, "error", err)
+			return
+		}
+		entries, err := f.ReadDir(1)
+		f.Close() // solo lectura: cerrar no puede perder datos
+		if err != nil && !errors.Is(err, io.EOF) {
 			im.log.Error("no se pudo mirar una carpeta de la entrada", "carpeta", dir, "error", err)
 			return
 		}
 		if len(entries) > 0 {
 			return
 		}
-		if err := os.Remove(dir); err != nil {
+		if err := im.inboxRoot.Remove(filepath.FromSlash(dir)); err != nil {
 			im.log.Error("no se pudo borrar una carpeta vacía de la entrada", "carpeta", dir, "error", err)
 			return
 		}
-		dir = filepath.Dir(dir)
+		dir = path.Dir(dir)
 	}
 }
 
 // Recover se ejecuta al arrancar. Borra las carpetas de trabajo que dejó un
-// corte y devuelve los archivos de la biblioteca sin pista en la base de datos.
+// corte y devuelve los archivos de la biblioteca sin pista en la base de datos y
+// las carátulas sin álbum que las referencie.
 // Esos no los borra: una cadena de conexión a una base vacía se llevaría la
 // biblioteca entera.
 func (im *Importer) Recover(ctx context.Context) ([]string, error) {
-	entries, err := os.ReadDir(im.library)
+	entries, err := im.readDir(im.library)
 	if err != nil {
 		return nil, fmt.Errorf("recuperar: %w", err)
 	}
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), workDirPrefix) {
 			p := filepath.Join(im.library, e.Name())
-			if err := os.RemoveAll(p); err != nil {
+			if err := im.removeAll(p); err != nil {
 				return nil, fmt.Errorf("recuperar: borrar %s: %w", p, err)
 			}
 			im.log.Info("borrada una carpeta de trabajo que dejó un corte", "carpeta", p)
@@ -442,7 +570,7 @@ func (im *Importer) Recover(ctx context.Context) ([]string, error) {
 	byID := map[int64][]string{}
 	for _, quality := range []string{db.QualityOriginal, db.QualityAAC256} {
 		dir := im.versionDir(quality)
-		files, err := os.ReadDir(dir)
+		files, err := im.readDir(dir)
 		if err != nil {
 			return nil, fmt.Errorf("recuperar: %w", err)
 		}
@@ -474,11 +602,169 @@ func (im *Importer) Recover(ctx context.Context) ([]string, error) {
 	for _, p := range orphans {
 		im.log.Warn("archivo de la biblioteca sin pista en la base de datos; no se borra", "archivo", p)
 	}
+
+	covers, err := im.orphanCovers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("recuperar: %w", err)
+	}
+	orphans = append(orphans, covers...)
+	slices.Sort(orphans)
+	return orphans, nil
+}
+
+// orphanCovers avisa de las carátulas de covers/ que ningún álbum referencia y
+// devuelve sus rutas. Las deja un corte entre colocar la carátula y confirmar la
+// transacción (ADR-015). Tampoco se borran, por la misma razón que las versiones:
+// con la base de datos equivocada, todas parecerían huérfanas.
+func (im *Importer) orphanCovers(ctx context.Context) ([]string, error) {
+	files, err := im.readDir(im.coverDir())
+	if err != nil {
+		return nil, fmt.Errorf("leer las carátulas: %w", err)
+	}
+	type cover struct {
+		name, ext string
+		albumID   int64
+		thumb     bool // miniatura: sobra si el álbum no tiene carátula
+	}
+	var orphans []string
+	var named []cover
+	for _, f := range files {
+		idText, ext, _ := strings.Cut(f.Name(), ".")
+		thumb := false
+		if t, ok := strings.CutSuffix(idText, "-"+strconv.Itoa(library.ThumbSize)); ok && ext == "jpg" {
+			idText, thumb = t, true
+		}
+		id, err := strconv.ParseInt(idText, 10, 64)
+		// ParseInt acepta «+12»; la carátula del álbum 12 solo puede llamarse «12».
+		// Y solo se borra lo que el importador pudo escribir: ID positivo y jpg o png
+		// («12.txt», «12.jpg.bak» o «-5.jpg» no son suyos).
+		if err != nil || f.IsDir() || idText != strconv.FormatInt(id, 10) || id <= 0 || (ext != "jpg" && ext != "png") {
+			orphans = append(orphans, filepath.Join(im.coverDir(), f.Name()))
+			im.log.Warn("archivo en covers/ que no tiene forma de carátula; no se borra",
+				"archivo", path.Join(library.CoverDir, f.Name()))
+			continue
+		}
+		named = append(named, cover{name: f.Name(), ext: ext, albumID: id, thumb: thumb})
+	}
+	ids := make([]int64, 0, len(named))
+	for _, c := range named {
+		ids = append(ids, c.albumID)
+	}
+	exts, err := db.AlbumCovers(ctx, im.pool, ids)
+	if err != nil {
+		return nil, fmt.Errorf("carátulas sin dueño: %w", err)
+	}
+	unowned := 0
+	for _, c := range named {
+		if ext, ok := exts[c.albumID]; !ok || (!c.thumb && ext != c.ext) {
+			unowned++
+		}
+	}
+	mayDelete, err := im.safeToDeleteCovers(ctx, len(named), unowned)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range named {
+		if ext, ok := exts[c.albumID]; ok && (c.thumb || ext == c.ext) {
+			continue
+		}
+		file := filepath.Join(im.coverDir(), c.name)
+		rel := path.Join(library.CoverDir, c.name)
+		removed := false
+		if mayDelete {
+			removed, err = im.removeOrphanCover(ctx, c.albumID, c.name, c.thumb, c.ext)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if removed {
+			im.log.Warn("carátula sin dueño borrada: llevaba más de un día sin álbum que la referencie y se puede regenerar del original",
+				"álbum", c.albumID, "archivo", rel)
+			continue
+		}
+		orphans = append(orphans, file)
+		// Mientras siga ahí, las pistas nuevas del álbum con una carátula del mismo
+		// formato no se importan: placeAll no pisa un destino que ya existe.
+		im.log.Warn("carátula que ningún álbum referencia; se borrará pasado el plazo de gracia, y hasta entonces puede bloquear las pistas nuevas del álbum",
+			"álbum", c.albumID, "archivo", rel)
+	}
 	return orphans, nil
 }
 
 func (im *Importer) versionDir(quality string) string {
 	return filepath.Join(im.library, library.Dir(quality))
+}
+
+// safeToDeleteCovers es la salvaguarda de proporción del borrado de carátulas: con la
+// base de datos equivocada, vacía o de una copia antigua, todas las carátulas de
+// covers/ parecerían huérfanas y el plazo de 24 h (que mira la fecha del archivo, no
+// cuánto tiempo lleva la base mal) no protege. No se borra nada si la base no tiene
+// ningún álbum con carátula mientras en disco hay carátulas, ni si se iba a borrar
+// más de la mitad y más de maxOrphanCoverDeletes. Se avisa y se deja para que lo
+// mire una persona.
+func (im *Importer) safeToDeleteCovers(ctx context.Context, onDisk, unowned int) (bool, error) {
+	if unowned == 0 {
+		return true, nil
+	}
+	inDB, err := db.CountAlbumCovers(ctx, im.pool)
+	if err != nil {
+		return false, fmt.Errorf("recuperar: %w", err)
+	}
+	switch {
+	case inDB == 0 && onDisk > 0:
+		im.log.Warn("no se borra ninguna carátula sin dueño: la base de datos no tiene ninguna carátula y en covers/ hay; ¿es la base de datos que corresponde a esta biblioteca?",
+			"en_disco", onDisk)
+		return false, nil
+	case unowned > maxOrphanCoverDeletes && unowned*2 > onDisk:
+		im.log.Warn("no se borra ninguna carátula sin dueño: serían más de la mitad de las de covers/; ¿es la base de datos que corresponde a esta biblioteca?",
+			"sin_dueño", unowned, "en_disco", onDisk)
+		return false, nil
+	}
+	return true, nil
+}
+
+// removeOrphanCover borra la carátula name del álbum albumID si lleva más de
+// OrphanCoverGrace sin que nada la referencie. Antes de borrar vuelve a mirar la base
+// de datos: una importación que acaba de confirmarse la habría hecho suya después
+// del primer vistazo. Solo borra archivos con forma de carátula; lo demás de covers/
+// se avisa y se queda. Devuelve si la borró.
+func (im *Importer) removeOrphanCover(ctx context.Context, albumID int64, name string, thumb bool, ext string) (bool, error) {
+	file := filepath.Join(im.coverDir(), name)
+	info, err := im.lstat(file)
+	if err != nil {
+		// Una carátula que no se puede ni mirar no debe impedir que el servidor arranque.
+		im.log.Warn("no se pudo mirar una carátula sin dueño; se deja", "archivo", name, "error", err)
+		return false, nil
+	}
+	if !info.Mode().IsRegular() || im.now().Sub(info.ModTime()) < OrphanCoverGrace {
+		return false, nil
+	}
+	exts, err := db.AlbumCovers(ctx, im.pool, []int64{albumID})
+	if err != nil {
+		return false, fmt.Errorf("comprobar la carátula %s antes de borrarla: %w", name, err)
+	}
+	if got, ok := exts[albumID]; ok && (thumb || got == ext) {
+		return false, nil
+	}
+	if err := im.remove(file); err != nil {
+		// Si no se puede borrar (permisos, disco de solo lectura), el servidor arranca
+		// igual: la carátula sigue en la lista de huérfanos y se avisa.
+		im.log.Warn("no se pudo borrar una carátula sin dueño; se deja", "archivo", name, "error", err)
+		return false, nil
+	}
+	return true, nil
+}
+
+func (im *Importer) coverDir() string {
+	return filepath.Join(im.library, library.CoverDir)
+}
+
+func (im *Importer) thumbPath(albumID int64) string {
+	return filepath.Join(im.library, filepath.FromSlash(library.ThumbFile(albumID)))
+}
+
+func (im *Importer) coverPath(albumID int64, ext string) string {
+	return filepath.Join(im.library, filepath.FromSlash(library.CoverFile(albumID, ext)))
 }
 
 func (im *Importer) versionPath(quality string, id int64, ext string) string {
@@ -502,20 +788,212 @@ func hashFile(name string) (sum [32]byte, size int64, err error) {
 
 // syncDir lleva a disco la entrada de un archivo recién renombrado, para que el
 // renombrado sobreviva a un corte de luz.
-func syncDir(dir string) error {
+func (im *Importer) syncDir(dir string) error {
 	// Windows no deja abrir una carpeta para sincronizarla; el servidor es Linux.
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	f, err := os.Open(dir)
+	rel, err := im.rel(dir)
 	if err != nil {
-		return fmt.Errorf("abrir %s: %w", dir, err)
+		return err
+	}
+	f, err := im.data.Open(rel)
+	if err != nil {
+		return fmt.Errorf("abrir %s para sincronizarla: %w", dir, err)
 	}
 	if err := f.Sync(); err != nil {
-		return errors.Join(fmt.Errorf("llevar %s a disco: %w", dir, err), f.Close())
+		return errors.Join(fmt.Errorf("sincronizar %s: %w", dir, err), f.Close())
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("cerrar %s: %w", dir, err)
 	}
 	return nil
+}
+
+// unsafeSourceError es una fuente que no se puede abrir de forma segura: un enlace
+// simbólico que sale de la carpeta de datos, o algo que no es un archivo regular.
+type unsafeSourceError struct{ reason string }
+
+func (e *unsafeSourceError) Error() string { return e.reason }
+
+// copySource abre rel dentro de entrada/ con el Root y la copia a work, y devuelve
+// la ruta de la copia y el SHA-256 de lo copiado. Un archivo que ya no está es un
+// error de sistema (se reintenta); uno que no se puede abrir con seguridad es un
+// unsafeSourceError.
+func (im *Importer) copySource(rel, work string, limit int64) (copied string, sum [32]byte, err error) {
+	// O_NONBLOCK: si entre el listado y la apertura alguien cambia el archivo por una
+	// tubería con nombre, abrirla sin él se quedaría esperando a un escritor para
+	// siempre y pararía la importación. Con él se abre y el Stat la rechaza.
+	f, err := im.inboxRoot.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil && isUnsafePath(err) {
+		return "", sum, &unsafeSourceError{reason: "no se puede abrir de forma segura: " + err.Error()}
+	}
+	if err != nil {
+		// Un archivo que ya no está, sin permisos o demasiados abiertos son cosas del
+		// sistema que pueden pasar: se reintenta, no se manda a fallidos/.
+		return "", sum, fmt.Errorf("abrir %s: %w", rel, err)
+	}
+	defer f.Close() // solo lectura: cerrar no puede perder datos
+	// Se mira el archivo ya abierto, no su nombre: entre medias el nombre pudo cambiar.
+	info, err := f.Stat()
+	if err != nil {
+		return "", sum, fmt.Errorf("mirar %s: %w", rel, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", sum, &unsafeSourceError{reason: "no es un archivo regular"}
+	}
+	if info.Size() > limit {
+		return "", sum, &tooBigError{size: info.Size(), limit: limit}
+	}
+	copied = filepath.Join(work, "copia-de-la-fuente"+strings.ToLower(path.Ext(rel)))
+	out, err := os.OpenFile(copied, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
+	if err != nil {
+		return "", sum, fmt.Errorf("crear la copia de trabajo: %w", err)
+	}
+	h := sha256.New()
+	// Un archivo que crece mientras se copia no pasa del tope: se corta.
+	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", sum, errors.Join(fmt.Errorf("copiar %s: %w", rel, err), out.Close())
+	}
+	if err := out.Close(); err != nil {
+		return "", sum, fmt.Errorf("cerrar la copia de trabajo: %w", err)
+	}
+	if n > limit {
+		return "", sum, &tooBigError{size: n, limit: limit}
+	}
+	// Si alguien seguía escribiendo el archivo mientras se copiaba, la copia es una
+	// foto a medias: se descarta y se reintenta cuando la vigilancia lo vea quieto.
+	after, err := f.Stat()
+	if err != nil {
+		return "", sum, fmt.Errorf("mirar %s tras copiarlo: %w", rel, err)
+	}
+	if err := checkUnchanged(info, after, n); err != nil {
+		return "", sum, fmt.Errorf("copiar %s: %w", rel, err)
+	}
+	copy(sum[:], h.Sum(nil))
+	return copied, sum, nil
+}
+
+// checkUnchanged dice si el archivo era el mismo antes y después de copiarlo: mismo
+// tamaño, misma fecha de modificación y tantos bytes copiados como medía.
+func checkUnchanged(before, after fs.FileInfo, copied int64) error {
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || copied != after.Size() {
+		return errors.New("el archivo cambió mientras se copiaba")
+	}
+	return nil
+}
+
+// isUnsafePath dice si err de abrir un archivo con el Root es que el camino sale de
+// la carpeta de datos (un enlace simbólico) o es un bucle de enlaces, y no un fallo
+// del sistema. os no exporta ese error, así que se reconoce por su texto; un test lo
+// vigila.
+func isUnsafePath(err error) bool {
+	return errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), "path escapes from parent")
+}
+
+// Los accesos a la carpeta de datos van por im.data (un os.Root): una ruta que
+// salga de ella, o un enlace simbólico que apunte fuera, da error (ADR-032). Las
+// rutas llegan absolutas, como las construye el importador, y aquí se hacen
+// relativas al Root. La carpeta de trabajo, creada por el propio importador, es lo
+// único que se toca por ruta absoluta, porque ahí escriben ffmpeg y flac.
+
+// rel da la ruta de abs relativa a la carpeta de datos.
+func (im *Importer) rel(abs string) (string, error) {
+	r, err := filepath.Rel(im.dataDir, abs)
+	if err != nil || !filepath.IsLocal(r) {
+		return "", fmt.Errorf("%s está fuera de la carpeta de datos", abs)
+	}
+	return r, nil
+}
+
+func (im *Importer) lstat(abs string) (fs.FileInfo, error) {
+	r, err := im.rel(abs)
+	if err != nil {
+		return nil, err
+	}
+	return im.data.Lstat(r)
+}
+
+func (im *Importer) rename(oldAbs, newAbs string) error {
+	o, err := im.rel(oldAbs)
+	if err != nil {
+		return err
+	}
+	n, err := im.rel(newAbs)
+	if err != nil {
+		return err
+	}
+	return im.data.Rename(o, n)
+}
+
+func (im *Importer) remove(abs string) error {
+	r, err := im.rel(abs)
+	if err != nil {
+		return err
+	}
+	return im.data.Remove(r)
+}
+
+func (im *Importer) removeAll(abs string) error {
+	r, err := im.rel(abs)
+	if err != nil {
+		return err
+	}
+	return im.data.RemoveAll(r)
+}
+
+func (im *Importer) mkdirAll(abs string) error {
+	r, err := im.rel(abs)
+	if err != nil {
+		return err
+	}
+	return im.data.MkdirAll(r, dirPerm)
+}
+
+func (im *Importer) writeFile(abs string, data []byte) error {
+	r, err := im.rel(abs)
+	if err != nil {
+		return err
+	}
+	f, err := im.data.OpenFile(r, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	return f.Close()
+}
+
+// readDir lista abs ordenada por nombre, como os.ReadDir.
+func (im *Importer) readDir(abs string) ([]fs.DirEntry, error) {
+	r, err := im.rel(abs)
+	if err != nil {
+		return nil, err
+	}
+	f, err := im.data.Open(r)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := f.ReadDir(-1)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, nil
+}
+
+// maxSourceBytes es el tope fijo de una fuente en entrada/ (decisión del desarrollador,
+// 2026-10-23): 8 GiB por archivo. Lo que pasa va a fallidos/ con su nota, sin leerlo.
+const maxSourceBytes = 8 << 30
+
+// tooBigError es una fuente que pasa del tope de tamaño.
+type tooBigError struct{ size, limit int64 }
+
+func (e *tooBigError) Error() string {
+	return fmt.Sprintf("el archivo pesa más de %d MiB, el máximo es %d MiB", e.size>>20, e.limit>>20)
 }

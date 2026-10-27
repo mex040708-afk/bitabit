@@ -19,3 +19,19 @@ func TestFile(t *testing.T) {
 		}
 	}
 }
+
+func TestCoverFile(t *testing.T) {
+	tests := []struct {
+		albumID int64
+		ext     string
+		want    string
+	}{
+		{1, "jpg", "covers/1.jpg"},
+		{4312, "png", "covers/4312.png"},
+	}
+	for _, tt := range tests {
+		if got := CoverFile(tt.albumID, tt.ext); got != tt.want {
+			t.Errorf("CoverFile(%d, %q) = %q, want %q", tt.albumID, tt.ext, got, tt.want)
+		}
+	}
+}

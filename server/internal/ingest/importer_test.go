@@ -425,7 +425,8 @@ func TestRunImportsWhatArrives(t *testing.T) {
 	e := newImportEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- e.im.Run(ctx, 20*time.Millisecond, 0) }()
+	// Con 0 de quietud se importaría a medias, mientras ffmpeg aún escribe.
+	go func() { done <- e.im.Run(ctx, 20*time.Millisecond, 300*time.Millisecond) }()
 
 	e.put(t, "Llega/a.flac", "44100", "-c:a", "flac")
 	deadline := time.Now().Add(30 * time.Second)

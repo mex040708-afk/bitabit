@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/netip"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -84,5 +85,34 @@ func TestLockoutEvictsOldestUnblockedWhenFull(t *testing.T) {
 	}
 	if _, blocked := l.blocked(testIP, start); !blocked {
 		t.Error("borró una IP bloqueada al llenarse la tabla")
+	}
+}
+
+// Cambiar de dirección dentro de la misma /64 no esquiva el bloqueo.
+func TestLockoutCountsAnIPv6RangeAsOneIP(t *testing.T) {
+	l := newLockout()
+	for i := 0; i < maxFailures; i++ {
+		l.failed(netip.MustParseAddr("2001:db8:5:5::"+strconv.Itoa(i+1)), start)
+	}
+	if _, blocked := l.blocked(netip.MustParseAddr("2001:db8:5:5::ffff"), start); !blocked {
+		t.Error("diez fallos desde distintas direcciones de la misma /64 deben bloquearla")
+	}
+	if _, blocked := l.blocked(netip.MustParseAddr("2001:db8:5:6::1"), start); blocked {
+		t.Error("otra /64 no está bloqueada")
+	}
+}
+
+// Con la tabla llena de IPs bloqueadas, una nueva entra a costa de la que antes se
+// desbloquearía, y la tabla no crece más allá del tope.
+func TestLockoutTableStaysBoundedWhenEverythingIsBlocked(t *testing.T) {
+	l := newLockout()
+	for i := 0; i < maxTrackedIPs+50; i++ {
+		ip := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+		for j := 0; j < maxFailures; j++ {
+			l.failed(ip, start.Add(time.Duration(i)*time.Second))
+		}
+	}
+	if n := len(l.ips); n > maxTrackedIPs {
+		t.Errorf("la tabla tiene %d entradas, tope %d", n, maxTrackedIPs)
 	}
 }

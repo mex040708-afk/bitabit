@@ -48,14 +48,15 @@ type Session struct {
 // Service comprueba la contraseña, abre sesiones y valida los tokens. Es seguro
 // para uso concurrente.
 type Service struct {
-	pool *pgxpool.Pool
-	lock *lockout
-	now  func() time.Time // los tests lo cambian para no esperar 24 horas
+	pool     *pgxpool.Pool
+	lock     *lockout
+	verified *verifiedCache   // contraseñas ya comprobadas para CheckPassword
+	now      func() time.Time // los tests lo cambian para no esperar 24 horas
 }
 
 // NewService trabaja con la base de datos de pool.
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, lock: newLockout(), now: time.Now}
+	return &Service{pool: pool, lock: newLockout(), verified: newVerifiedCache(), now: time.Now}
 }
 
 // Login comprueba la contraseña que envía ip y, si es correcta, abre una sesión
@@ -80,9 +81,9 @@ func (s *Service) Login(ctx context.Context, ip netip.Addr, password, device str
 	if !hasPassword {
 		return "", Session{}, s.failure(ip, now)
 	}
-	ok, err := VerifyPassword(password, stored)
+	ok, err := s.verify(ctx, ip, password, stored)
 	if err != nil {
-		return "", Session{}, fmt.Errorf("comprobar la contraseña: %w", err)
+		return "", Session{}, err
 	}
 	if !ok {
 		return "", Session{}, s.failure(ip, now)
@@ -98,6 +99,38 @@ func (s *Service) Login(ctx context.Context, ip netip.Addr, password, device str
 		return "", Session{}, err
 	}
 	return token, sess, nil
+}
+
+// CheckPassword comprueba la contraseña que envía ip sin abrir ninguna sesión: es
+// la forma antigua de autenticarse de la capa OpenSubsonic, que manda la contraseña
+// en cada petición (ADR-031). Cuenta para el bloqueo igual que Login.
+func (s *Service) CheckPassword(ctx context.Context, ip netip.Addr, password string) error {
+	ip = ip.Unmap()
+	now := s.now()
+	if wait, blocked := s.lock.blocked(ip, now); blocked {
+		return &BlockedError{RetryAfter: wait}
+	}
+	stored, hasPassword, err := s.storedHash(ctx)
+	if err != nil {
+		return err
+	}
+	if !hasPassword {
+		return s.failure(ip, now)
+	}
+	if s.verified.has(stored, password, now) {
+		s.lock.succeeded(ip)
+		return nil
+	}
+	ok, err := s.verify(ctx, ip, password, stored)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return s.failure(ip, now)
+	}
+	s.verified.add(stored, password, now)
+	s.lock.succeeded(ip)
+	return nil
 }
 
 // failure anota un fallo de ip y devuelve su error. El fallo que llega al límite

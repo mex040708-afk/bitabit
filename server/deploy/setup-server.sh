@@ -24,7 +24,7 @@ fi
 echo "== Paquetes"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q --no-install-recommends postgresql ffmpeg flac
+apt-get install -y -q --no-install-recommends postgresql ffmpeg flac rsync
 
 echo "== Usuario $service_user"
 # De sistema y con la contraseña bloqueada: nadie entra con él por SSH ni

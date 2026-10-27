@@ -1,0 +1,55 @@
+# Copia de seguridad nocturna de Bitabit (ADR-035): primero la base de datos y
+# después la biblioteca, para que la copia de la biblioteca tenga todo lo que
+# referencia la base. La lanza bitabit-backup.timer y la instala install-backup.sh.
+#
+# No lleva EnvironmentFile a propósito: /etc/bitabit/env tiene la clave de los
+# enlaces, y los scripts leen de ahí solo las variables que necesitan.
+# La carpeta de copias se da con un drop-in que escribe install-backup.sh
+# (bitabit-backup.service.d/backup-dir.conf, con ReadWritePaths=).
+
+[Unit]
+Description=Bitabit, copia de seguridad de la base de datos y la biblioteca
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=bitabit
+Group=bitabit
+# Si falla la base de datos, no se copia la biblioteca: la unidad acaba en error.
+ExecStart=/usr/local/lib/bitabit/backup/backup-db.sh
+ExecStart=/usr/local/lib/bitabit/backup/backup-library.sh --verify
+# Que no le quite CPU ni disco al servicio que sirve música.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h
+
+# Endurecimiento: todo de solo lectura (también /srv/bitabit) salvo la carpeta de
+# copias, que añade el drop-in. Sin red: PostgreSQL se usa por su socket Unix.
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectHome=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectProc=invisible
+ProcSubset=pid
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
