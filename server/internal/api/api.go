@@ -16,7 +16,7 @@ import (
 )
 
 // APIVersion es la versión del contrato que sirve este código (info.apiVersion).
-const APIVersion = "1.0.0"
+const APIVersion = "1.1.1"
 
 // requestTimeout acota cada petición: ninguna consulta espera más que esto.
 const requestTimeout = 10 * time.Second

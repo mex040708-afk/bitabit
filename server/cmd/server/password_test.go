@@ -18,6 +18,7 @@ func TestReadPassword(t *testing.T) {
 		"contraseña de prueba":           "contraseña de prueba",  // sin fin de línea
 		"contraseña ñandú\nsobra esta\n": "contraseña ñandú",      // solo se lee la primera línea
 		"  doce con espacios  \n":        "  doce con espacios  ", // los espacios cuentan
+		"\uFEFFcontraseña de prueba\r\n": "contraseña de prueba",  // BOM de PowerShell
 	}
 	for in, want := range good {
 		got, err := readPassword(strings.NewReader(in))
@@ -31,6 +32,7 @@ func TestReadPassword(t *testing.T) {
 		"\n",
 		"corta\n",
 		"\r\n",
+		"\uFEFF\r\n", // solo el BOM
 		strings.Repeat("a", maxPasswordInput) + "\n", // demasiado larga
 	}
 	for _, in := range bad {

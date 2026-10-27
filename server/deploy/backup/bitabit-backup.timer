@@ -1,0 +1,13 @@
+# Lanza la copia de seguridad cada noche (ADR-035). Persistent recupera la que se
+# perdió si el PC estaba apagado a esa hora.
+
+[Unit]
+Description=Bitabit, copia de seguridad nocturna
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
