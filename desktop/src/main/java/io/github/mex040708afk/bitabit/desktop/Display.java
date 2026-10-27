@@ -19,6 +19,10 @@ final class Display {
     record TrackRow(String number, String title, String duration, String format) {
     }
 
+    /** Una fila de la tabla de pistas encontradas. */
+    record FoundTrackRow(String title, String artist, String album, String duration) {
+    }
+
     static boolean isBlank(String text) {
         return text == null || text.isBlank();
     }
@@ -83,5 +87,12 @@ final class Display {
                     + String.format(Locale.ROOT, "%02d", track.getTrackNumber().get());
         }
         return new TrackRow(number, name(track.getTitle()), duration(track.getDurationMs()), format(track.getFiles()));
+    }
+
+    /** Cómo se escribe una pista encontrada. Sin álbum, que el contrato exige, sale «(sin nombre)». */
+    static FoundTrackRow foundRow(Track track) {
+        return new FoundTrackRow(name(track.getTitle()), name(track.getArtist()),
+                track.getAlbum() == null ? UNNAMED : name(track.getAlbum().getTitle()),
+                duration(track.getDurationMs()));
     }
 }

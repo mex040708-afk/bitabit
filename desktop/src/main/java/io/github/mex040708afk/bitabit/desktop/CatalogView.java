@@ -5,12 +5,16 @@ import io.github.mex040708afk.bitabit.core.Contract.Album;
 import io.github.mex040708afk.bitabit.core.Contract.AlbumSummary;
 import io.github.mex040708afk.bitabit.core.Contract.Artist;
 import io.github.mex040708afk.bitabit.core.Contract.ArtistSummary;
+import io.github.mex040708afk.bitabit.core.Contract.SearchResult;
+import io.github.mex040708afk.bitabit.core.Contract.Track;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import javafx.animation.PauseTransition;
 import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -21,17 +25,23 @@ import javafx.scene.control.ChoiceBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.Tab;
+import javafx.scene.control.TabPane;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextField;
+import javafx.scene.input.KeyCode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.util.Duration;
 
 /**
- * El catálogo: artistas, álbumes de un artista, todos los álbumes y las pistas de un álbum
- * (ADR-026). Cada pantalla se pide al servidor en segundo plano y queda guardada en una pila,
+ * El catálogo: artistas, álbumes de un artista, todos los álbumes, las pistas de un álbum y
+ * la búsqueda (ADR-026). Cada pantalla se pide al servidor en segundo plano y queda guardada en una pila,
  * así «Atrás» vuelve sin recargar y con el desplazamiento donde estaba. Solo se toca desde
  * el hilo de JavaFX.
  */
@@ -39,6 +49,8 @@ final class CatalogView {
 
     private record Page(String title, Node content) {
     }
+
+    private static final String SEARCH_HINT = "Escribe para buscar artistas, álbumes y canciones.";
 
     private final Catalog catalog;
     private final Background background;
@@ -53,6 +65,15 @@ final class CatalogView {
     private Node showing;
     /** Sube con cada navegación: una respuesta de una pantalla que ya no se quiere se descarta. */
     private int navigation;
+
+    /** La página de búsqueda se crea una vez: al volver a ella siguen el texto y los resultados. */
+    private final TextField searchField = new TextField();
+    private final StackPane searchResults = new StackPane();
+    private final VBox searchPage = new VBox(8, searchField, searchResults);
+    /** Espera a que se deje de escribir antes de preguntar al servidor. */
+    private final PauseTransition searchPause = new PauseTransition(Duration.millis(300));
+    /** Como {@link #navigation}, pero para las búsquedas: solo vale la respuesta de la última. */
+    private int searchNumber;
 
     CatalogView(Catalog catalog, Background background, Covers covers, Runnable onSessionExpired) {
         this.catalog = catalog;
@@ -69,6 +90,17 @@ final class CatalogView {
         root.setTop(bar);
         back.setVisible(false);
         back.managedProperty().bind(back.visibleProperty());
+
+        searchField.setPromptText("Artista, álbum o canción");
+        searchField.textProperty().addListener((obs, old, text) -> searchPause.playFromStart());
+        searchPause.setOnFinished(e -> search());
+        searchField.setOnAction(e -> {
+            searchPause.stop();
+            search();
+        });
+        searchPage.setPadding(new Insets(0, 12, 12, 12));
+        VBox.setVgrow(searchResults, Priority.ALWAYS);
+        searchResults.getChildren().setAll(hint(SEARCH_HINT));
     }
 
     Parent root() {
@@ -111,6 +143,95 @@ final class CatalogView {
         });
     }
 
+    void showSearch() {
+        navigation++;
+        history.clear();
+        Page page = new Page("Buscar", searchPage);
+        history.push(page);
+        show(page.content(), page.title());
+        searchField.requestFocus();
+    }
+
+    private void search() {
+        int mine = ++searchNumber;
+        switch (Catalog.query(searchField.getText())) {
+            case Catalog.Query.Empty empty -> results(hint(SEARCH_HINT));
+            case Catalog.Query.TooLong tooLong -> results(hint("La búsqueda tiene " + tooLong.chars()
+                    + " caracteres y el máximo es " + Catalog.MAX_QUERY_CHARS + "."));
+            case Catalog.Query.Text query -> {
+                results(hint("Buscando…"));
+                background.run(() -> catalog.search(query.text()), result -> {
+                    if (mine == searchNumber) {
+                        results(found(query.text(), result));
+                    }
+                }, error -> {
+                    if (mine != searchNumber) {
+                        return;
+                    }
+                    if (error instanceof Catalog.SessionExpired) {
+                        onSessionExpired.run();
+                        return;
+                    }
+                    results(failure(error instanceof IOException ? error.getMessage()
+                            : "Error inesperado al buscar: " + error, this::search));
+                });
+            }
+        }
+    }
+
+    private void results(Node content) {
+        searchResults.getChildren().setAll(content);
+    }
+
+    /** Una pestaña por tipo, solo para los que traen algo, empezando por la primera que tenga. */
+    private Node found(String text, SearchResult result) {
+        TabPane tabs = new TabPane();
+        tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+        if (!result.getArtists().isEmpty()) {
+            tabs.getTabs().add(tab("Artistas", result.getArtists().size(), artistList(result.getArtists())));
+        }
+        if (!result.getAlbums().isEmpty()) {
+            AlbumGrid grid = new AlbumGrid(covers, true, this::showAlbum);
+            grid.setAlbums(result.getAlbums());
+            tabs.getTabs().add(tab("Álbumes", result.getAlbums().size(), grid));
+        }
+        if (!result.getTracks().isEmpty()) {
+            tabs.getTabs().add(tab("Pistas", result.getTracks().size(), foundTracks(result.getTracks())));
+        }
+        return tabs.getTabs().isEmpty() ? hint("No se ha encontrado nada para «" + text + "».") : tabs;
+    }
+
+    private static Tab tab(String name, int count, Node content) {
+        return new Tab(name + " (" + count + ")", content);
+    }
+
+    /** Una pista abre su álbum (doble clic o Intro), mientras no se pueda reproducir desde aquí. */
+    private Node foundTracks(List<Track> tracks) {
+        TableView<Track> table = new TableView<>();
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.getColumns().add(column("Título", 280, (Track t) -> Display.foundRow(t).title(), Pos.CENTER_LEFT));
+        table.getColumns().add(column("Artista", 180, (Track t) -> Display.foundRow(t).artist(), Pos.CENTER_LEFT));
+        table.getColumns().add(column("Álbum", 200, (Track t) -> Display.foundRow(t).album(), Pos.CENTER_LEFT));
+        table.getColumns().add(column("Duración", 90, (Track t) -> Display.foundRow(t).duration(), Pos.CENTER_RIGHT));
+        table.getItems().setAll(tracks);
+        Consumer<Track> open = track -> {
+            if (track != null && track.getAlbum() != null) {
+                showAlbum(track.getAlbum().getId(), track.getAlbum().getTitle());
+            }
+        };
+        table.setOnMouseClicked(e -> {
+            if (e.getClickCount() == 2) {
+                open.accept(table.getSelectionModel().getSelectedItem());
+            }
+        });
+        table.setOnKeyPressed(e -> {
+            if (e.getCode() == KeyCode.ENTER) {
+                open.accept(table.getSelectionModel().getSelectedItem());
+            }
+        });
+        return table;
+    }
+
     private void showArtist(ArtistSummary summary) {
         open(Display.name(summary.getName()), false, () -> catalog.artist(summary.getId()), (Artist artist) -> {
             AlbumGrid grid = new AlbumGrid(covers, false, this::showAlbum);
@@ -120,7 +241,11 @@ final class CatalogView {
     }
 
     private void showAlbum(AlbumSummary summary) {
-        open(Display.name(summary.getTitle()), false, () -> catalog.album(summary.getId()), this::albumDetail);
+        showAlbum(summary.getId(), summary.getTitle());
+    }
+
+    private void showAlbum(long albumId, String albumTitle) {
+        open(Display.name(albumTitle), false, () -> catalog.album(albumId), this::albumDetail);
     }
 
     private Node artistList(List<ArtistSummary> artists) {
@@ -142,7 +267,7 @@ final class CatalogView {
         });
         list.setOnMouseClicked(e -> openSelected(list));
         list.setOnKeyPressed(e -> {
-            if (e.getCode() == javafx.scene.input.KeyCode.ENTER) {
+            if (e.getCode() == KeyCode.ENTER) {
                 openSelected(list);
             }
         });
@@ -193,9 +318,9 @@ final class CatalogView {
         return new VBox(header, table);
     }
 
-    private static TableColumn<Display.TrackRow, String> column(String name, double width,
-            Function<Display.TrackRow, String> value, Pos alignment) {
-        TableColumn<Display.TrackRow, String> column = new TableColumn<>(name);
+    private static <R> TableColumn<R, String> column(String name, double width, Function<R, String> value,
+            Pos alignment) {
+        TableColumn<R, String> column = new TableColumn<>(name);
         column.setPrefWidth(width);
         column.setSortable(false);
         column.setReorderable(false);
@@ -206,12 +331,25 @@ final class CatalogView {
 
     /** Un texto centrado si no hay nada que enseñar, o el contenido. */
     private static Node emptyOr(boolean empty, String text, Node content) {
-        if (!empty) {
-            return content;
-        }
+        return empty ? hint(text) : content;
+    }
+
+    private static Node hint(String text) {
         Label label = new Label(text);
+        label.setWrapText(true);
         VBox box = new VBox(label);
         box.setAlignment(Pos.CENTER);
+        return box;
+    }
+
+    /** El error con su contexto y un botón para volver a intentarlo. */
+    private static Node failure(String text, Runnable retry) {
+        Label message = new Label(text);
+        message.setWrapText(true);
+        Button again = new Button("Reintentar");
+        again.setOnAction(e -> retry.run());
+        VBox box = new VBox(10, message, again);
+        box.setPadding(new Insets(16));
         return box;
     }
 
@@ -241,14 +379,9 @@ final class CatalogView {
                 onSessionExpired.run();
                 return;
             }
-            Label message = new Label(error instanceof IOException ? error.getMessage()
-                    : "Error inesperado al cargar " + pageTitle + ": " + error);
-            message.setWrapText(true);
-            Button retry = new Button("Reintentar");
-            retry.setOnAction(e -> open(pageTitle, rootPage, load, build));
-            VBox box = new VBox(10, message, retry);
-            box.setPadding(new Insets(16));
-            show(box, pageTitle);
+            show(failure(error instanceof IOException ? error.getMessage()
+                    : "Error inesperado al cargar " + pageTitle + ": " + error,
+                    () -> open(pageTitle, rootPage, load, build)), pageTitle);
         });
     }
 

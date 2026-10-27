@@ -14,8 +14,8 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 /**
- * La ventana principal (ADR-026): navegación lateral (artistas, álbumes y el panel de
- * diagnóstico del prototipo), el contenido al lado y, abajo del menú, la sesión con
+ * La ventana principal (ADR-026): navegación lateral (artistas, álbumes, búsqueda y el
+ * panel de diagnóstico del prototipo), el contenido al lado y, abajo del menú, la sesión con
  * «Cerrar sesión». La barra de reproducción llegará en otra tarea.
  */
 final class MainView {
@@ -27,6 +27,7 @@ final class MainView {
     private final BorderPane root = new BorderPane();
     private final ToggleButton artists = new ToggleButton("Artistas");
     private final ToggleButton albums = new ToggleButton("Álbumes");
+    private final ToggleButton search = new ToggleButton("Buscar");
     private final ToggleButton diagnosis = new ToggleButton("Diagnóstico");
     private final ToggleGroup group = new ToggleGroup();
     private CatalogView catalog;
@@ -39,7 +40,7 @@ final class MainView {
         server.setMaxWidth(160);
         logout.setOnAction(e -> onLogout.run());
 
-        for (ToggleButton button : new ToggleButton[] {artists, albums, diagnosis}) {
+        for (ToggleButton button : new ToggleButton[] {artists, albums, search, diagnosis}) {
             button.setToggleGroup(group);
             button.setMaxWidth(Double.MAX_VALUE);
             button.setAlignment(Pos.CENTER_LEFT);
@@ -62,6 +63,12 @@ final class MainView {
                 root.setCenter(catalog.root());
             }
         });
+        search.setOnAction(e -> {
+            if (search.isSelected() && catalog != null) {
+                catalog.showSearch();
+                root.setCenter(catalog.root());
+            }
+        });
         diagnosis.setOnAction(e -> {
             if (diagnosis.isSelected()) {
                 root.setCenter(this.diagnostics);
@@ -70,7 +77,7 @@ final class MainView {
 
         Region spacer = new Region();
         VBox.setVgrow(spacer, Priority.ALWAYS);
-        VBox menu = new VBox(6, artists, albums, diagnosis, spacer, server, message, logout);
+        VBox menu = new VBox(6, artists, albums, search, diagnosis, spacer, server, message, logout);
         menu.setPadding(new Insets(12));
         menu.setPrefWidth(180);
         menu.setStyle("-fx-background-color: -fx-box-border;");
