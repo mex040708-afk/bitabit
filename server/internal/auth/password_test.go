@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Con parámetros mínimos los tests son rápidos. El hash real se prueba una vez.
@@ -124,5 +125,49 @@ func TestValidatePassword(t *testing.T) {
 		if err := ValidatePassword(p); err == nil {
 			t.Errorf("ValidatePassword(%d bytes) acepta una contraseña no válida", len(p))
 		}
+	}
+}
+
+// BenchmarkVerifyPassword mide lo que cuesta cada petición de /rest con u y p
+// (ADR-031): el servidor paga un Argon2id entero por cada una.
+func BenchmarkVerifyPassword(b *testing.B) {
+	phc, err := HashPassword("contraseña de prueba")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if ok, err := VerifyPassword("contraseña de prueba", phc); err != nil || !ok {
+			b.Fatalf("VerifyPassword = %v, %v", ok, err)
+		}
+	}
+}
+
+func TestVerifiedCacheRemembersOnlyForTheTTLAndPerHash(t *testing.T) {
+	c := newVerifiedCache()
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	if c.has("hash1", "clave", now) {
+		t.Fatal("la caché empieza vacía")
+	}
+	c.add("hash1", "clave", now)
+	if !c.has("hash1", "clave", now.Add(verifiedTTL-time.Second)) {
+		t.Error("debía recordar la contraseña dentro del plazo")
+	}
+	if c.has("hash1", "otra", now) || c.has("hash2", "clave", now) {
+		t.Error("otra contraseña u otro hash no pueden acertar")
+	}
+	if c.has("hash1", "clave", now.Add(verifiedTTL)) {
+		t.Error("pasado el plazo debía olvidarla")
+	}
+}
+
+func TestVerifiedCacheIsBounded(t *testing.T) {
+	c := newVerifiedCache()
+	now := time.Now()
+	for i := 0; i < 3*maxVerified; i++ {
+		c.add("hash", strings.Repeat("a", i+1), now)
+	}
+	if n := len(c.entries); n > maxVerified {
+		t.Errorf("la caché tiene %d entradas, máximo %d", n, maxVerified)
 	}
 }

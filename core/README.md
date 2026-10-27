@@ -13,6 +13,11 @@ servidor y no tiene interfaz. El contrato es `api/openapi.json` (ADR-014).
 - `Contract`: los objetos de la API v1. Los campos que el contrato deja en `null` se
   leen como `Optional`, y las fechas, como `Instant`.
 - `Json`: la lectura y la escritura con Gson. Ignora los campos que no conoce.
+- `PlayQueue`: la cola de reproducción, con aleatorio que recuerda el orden original
+  y repetición (`OFF`, `ALL`, `ONE`). Solo guarda el estado y avisa de los cambios;
+  no es segura entre hilos (ADR-022).
+- `QualityPolicy`: qué versión pedir, original o AAC de 256 kbit/s, según la red y la
+  preferencia del usuario. Si la pista no tiene la elegida, usa la otra (ADR-022).
 
 ## Uso
 
