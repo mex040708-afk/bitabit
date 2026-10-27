@@ -9,6 +9,7 @@ import static org.junit.Assert.assertTrue;
 
 import io.github.mex040708afk.bitabit.core.BitabitClient;
 import io.github.mex040708afk.bitabit.core.BitabitClient.AlbumSort;
+import io.github.mex040708afk.bitabit.core.BitabitClient.Quality;
 import io.github.mex040708afk.bitabit.core.Contract.Album;
 import io.github.mex040708afk.bitabit.core.Contract.AlbumSummary;
 import io.github.mex040708afk.bitabit.core.Contract.Artist;
@@ -94,6 +95,25 @@ public class CatalogTest {
 
         assertArrayEquals("imagen".getBytes(StandardCharsets.UTF_8), catalog.cover(7).orElseThrow());
         assertTrue(catalog.cover(8).isEmpty());
+    }
+
+    @Test
+    public void aLinkIsTheServerPlusItsMediaPath() throws IOException {
+        server.reply("GET /api/v1/tracks/4/link", FakeServer.Reply.json(200,
+                "{\"path\":\"/media/4.flac?exp=1&sig=abc\",\"quality\":\"orig\",\"expiresAt\":\"2026-10-27T12:00:00Z\"}"));
+
+        assertEquals(server.address() + "/media/4.flac?exp=1&sig=abc", catalog.link(4, Quality.ORIGINAL));
+    }
+
+    @Test
+    public void aLinkOutsideMediaIsRejectedWithoutShowingIt() {
+        server.reply("GET /api/v1/tracks/4/link", FakeServer.Reply.json(200,
+                "{\"path\":\"http://otro.example/x?sig=abc\",\"quality\":\"orig\",\"expiresAt\":\"2026-10-27T12:00:00Z\"}"));
+
+        IOException e = assertThrows(IOException.class, () -> catalog.link(4, Quality.ORIGINAL));
+
+        assertTrue(e.getMessage(), e.getMessage().startsWith("No se pudo cargar el enlace de la pista."));
+        assertFalse(e.getMessage(), e.getMessage().contains("sig"));
     }
 
     @Test

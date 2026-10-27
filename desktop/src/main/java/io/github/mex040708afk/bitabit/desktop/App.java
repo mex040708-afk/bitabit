@@ -1,11 +1,14 @@
 package io.github.mex040708afk.bitabit.desktop;
 
+import io.github.mex040708afk.bitabit.core.Contract.Track;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -18,8 +21,9 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
 /**
- * La app de escritorio: inicia sesión en el servidor (ADR-025) y, por ahora, enseña el
- * panel de diagnóstico del prototipo de la fase 1 (ADR-013).
+ * La app de escritorio: inicia sesión en el servidor (ADR-025), enseña el catálogo y lo
+ * reproduce con cola (ADR-026). El panel de diagnóstico del prototipo de la fase 1
+ * (ADR-013) sigue en el menú.
  *
  * <p>Las pruebas automáticas del prototipo siguen funcionando sin sesión: con
  * {@code --enlace-archivo=RUTA} o {@code --accion=medir|escuchar} la app abre solo el
@@ -42,6 +46,18 @@ public final class App extends Application {
         return t;
     });
 
+    /**
+     * Pedir el enlace y hablar con mpv, de uno en uno y en orden (ADR-026): los comandos de
+     * mpv esperan hasta 5 s y no pueden ir en el hilo de JavaFX ni en el de la red.
+     */
+    private final ExecutorService playbackPool = Executors.newSingleThreadExecutor(task -> {
+        Thread t = new Thread(task, "reproduccion");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private final String mpvExe = System.getenv().getOrDefault("BITABIT_MPV", "mpv");
+
     private final Sessions sessions = new Sessions(new SessionStore(SessionStore.defaultDir()),
             Sessions.deviceName(System.getenv()));
 
@@ -49,6 +65,9 @@ public final class App extends Application {
     private DiagnosticsView diagnostics;
     private LoginView login;
     private MainView main;
+    private PlayerBar bar;
+    /** La reproducción de la sesión abierta, o null. Solo se toca desde el hilo de JavaFX. */
+    private Playback playback;
 
     /** Solo se toca desde el hilo de JavaFX. */
     private Sessions.Active active;
@@ -77,12 +96,24 @@ public final class App extends Application {
 
         login = new LoginView(this::login);
         main = new MainView(diagnostics.root(), this::logout);
+        bar = new PlayerBar();
         stage.show();
         resume();
     }
 
     @Override
     public void stop() {
+        closePlayback();
+        playbackPool.shutdown();
+        try {
+            // Que mpv se cierre antes de que acabe la JVM, o se quedaría vivo.
+            if (!playbackPool.awaitTermination(6, TimeUnit.SECONDS)) {
+                System.getLogger(App.class.getName()).log(System.Logger.Level.WARNING,
+                        "mpv no se cerró en 6 s al salir");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         diagnostics.close();
         network.shutdownNow();
         coverPool.shutdownNow();
@@ -127,6 +158,7 @@ public final class App extends Application {
     private void logout() {
         Sessions.Active closing = active;
         main.busy(true);
+        closePlayback();
         inBackground(() -> sessions.logout(closing), warning -> {
             main.busy(false);
             active = null;
@@ -148,8 +180,31 @@ public final class App extends Application {
         active = session;
         Catalog catalog = new Catalog(session.client(), session.saved().server());
         Covers covers = new Covers(catalog, this::inCovers);
+        closePlayback();
+        PlaybackEvents events = new PlaybackEvents();
+        Playback started = new Playback(this::inPlayback, exclusive -> startPlayer(exclusive, events), catalog::link,
+                new Playback.View() {
+                    @Override
+                    public void nowPlaying(Optional<Track> track) {
+                        bar.nowPlaying(track);
+                    }
+
+                    @Override
+                    public void problem(String message) {
+                        bar.problem(message);
+                    }
+
+                    @Override
+                    public void sessionExpired() {
+                        bar.sessionExpired();
+                        App.this.sessionExpired(session);
+                    }
+                });
+        events.owner = started;
+        playback = started;
+        bar.bind(started);
         main.open(session.saved().server(), new CatalogView(catalog, this::inBackground, covers,
-                () -> sessionExpired(session)));
+                () -> sessionExpired(session), started::play), bar, started::pause);
         scene.setRoot(main.root());
     }
 
@@ -159,6 +214,7 @@ public final class App extends Application {
             return;
         }
         active = null;
+        closePlayback();
         String server = expired.saved().server();
         String notice = "La sesión ha caducado en " + server + ". Vuelve a iniciar sesión.";
         try {
@@ -167,6 +223,106 @@ public final class App extends Application {
             notice += " No se pudo borrar la sesión guardada: " + e.getMessage();
         }
         showLogin(Optional.of(server), Optional.of(notice));
+    }
+
+    /**
+     * Arranca mpv para la reproducción, en el hilo «reproduccion». Sus avisos llegan del hilo
+     * de la tubería y {@code events} los pasa al de JavaFX.
+     */
+    private Playback.Engine startPlayer(boolean exclusive, PlaybackEvents events)
+            throws IOException, InterruptedException {
+        try {
+            return Player.start(mpvExe, exclusive, events);
+        } catch (IOException e) {
+            throw new IOException("No se pudo arrancar mpv (" + mpvExe + "): " + e.getMessage()
+                    + ". Instálalo o pon su ruta en BITABIT_MPV.", e);
+        }
+    }
+
+    /**
+     * Pasa los avisos del Player a la barra y a la reproducción que lo arrancó. Los de una
+     * sesión que ya se cerró se descartan: su mpv puede tardar en callarse.
+     */
+    private final class PlaybackEvents implements Player.Listener {
+
+        /** Se pone una vez, en el hilo de JavaFX, antes de que arranque ningún mpv. */
+        private Playback owner;
+
+        /** Solo en el hilo de JavaFX. */
+        private boolean current() {
+            return owner != null && owner == playback;
+        }
+
+        @Override
+        public void onPosition(OptionalDouble seconds) {
+            Platform.runLater(() -> {
+                if (current()) {
+                    bar.position(seconds);
+                    owner.onPosition(seconds);
+                }
+            });
+        }
+
+        @Override
+        public void onDuration(OptionalDouble seconds) {
+            Platform.runLater(() -> {
+                if (current()) {
+                    bar.duration(seconds);
+                }
+            });
+        }
+
+        @Override
+        public void onPause(boolean paused) {
+            Platform.runLater(() -> {
+                if (current()) {
+                    bar.paused(paused);
+                }
+            });
+        }
+
+        @Override
+        public void onDecodedFormat(Optional<AudioParams> params) {
+            // La barra enseña lo que llega a Windows; lo decodificado está en el diagnóstico.
+        }
+
+        @Override
+        public void onOutputFormat(Optional<AudioParams> params) {
+            Platform.runLater(() -> {
+                if (current()) {
+                    bar.outputFormat(params);
+                }
+            });
+        }
+
+        @Override
+        public void onTrackEnded(EndReason reason, Optional<String> error) {
+            Platform.runLater(() -> {
+                if (current()) {
+                    owner.onTrackEnded(reason, error);
+                }
+            });
+        }
+
+        @Override
+        public void onFailure(IOException error) {
+            Platform.runLater(() -> {
+                if (current()) {
+                    owner.onEngineFailed(error);
+                }
+            });
+        }
+    }
+
+    private void closePlayback() {
+        if (playback != null) {
+            playback.close();
+            playback = null;
+        }
+    }
+
+    private <T> void inPlayback(Callable<T> task, Consumer<T> done, Consumer<Throwable> failed) {
+        inBackground(playbackPool, task, done, failed);
     }
 
     /** Un texto y, si se puede reintentar, el botón para hacerlo. */

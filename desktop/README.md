@@ -23,6 +23,16 @@ Con la sesión abierta, la ventana tiene navegación lateral (ADR-026): **Artist
 - Si el servidor responde 401 en cualquier llamada, se borra la sesión guardada y se vuelve al inicio de sesión.
 - Core todavía no pide `?size=256` (API 1.1.0) ni usa `ETag`: se descarga la carátula original.
 
+## Reproducción
+
+En el detalle de un álbum, doble clic o Intro en una pista pone el álbum entero en la cola desde ella; **▶ Reproducir** lo pone desde la primera. La barra de abajo tiene anterior, pausa y siguiente, la posición (salta al soltarla), el formato que llega a Windows y la casilla **Modo exclusivo**, marcada por defecto.
+
+- Cada pista pide su enlace justo antes de sonar, porque caducan, y siempre la versión original; si una pista solo tiene AAC, suena la AAC.
+- Al acabar una pista suena la siguiente. Al final de la cola se para. Si una pista falla, se dice por qué y la cola se para.
+- «Anterior» vuelve a empezar la pista si lleva más de 3 s.
+- Un único mpv para toda la cola: se arranca la primera vez que suena algo y se cierra al cerrar la sesión o la app.
+- Al entrar en **Diagnóstico**, la reproducción se pausa: «Escuchar» arranca su propio mpv, y dos en modo exclusivo no caben.
+
 ## Diagnóstico
 
 Debajo de la sesión sigue el panel del prototipo de la fase 1. Con un enlace firmado del servidor se puede:
@@ -36,6 +46,7 @@ Todo está en el paquete `io.github.mex040708afk.bitabit.desktop`:
 
 - `Mpv`: un proceso de mpv y su tubería JSON. Las opciones que tocan el audio son siempre las mismas (volumen a 100, sin ReplayGain).
 - `Player`: el reproductor de la app (ADR-020). Un único mpv vivo con `--idle=yes`; `play`, `pause`, `resume`, `togglePause`, `seek`, `stop` y el modo exclusivo, que se cambia sin reiniciar mpv. Avisa a un `Player.Listener` de la posición, la duración, la pausa, los formatos y el fin de cada pista con su motivo (`EndReason`). No conoce la cola. `PlayerEvents` traduce los mensajes de mpv a esos avisos.
+- `Playback`: la cola de core (`PlayQueue`), la calidad (`QualityPolicy`) y el `Player`, sin JavaFX. Se usa desde el hilo de JavaFX; pedir el enlace y hablar con mpv va al hilo «reproduccion», de uno en uno. `PlayerBar` es su barra.
 - `Listen` y `Measure`: las dos acciones del prototipo. `App` es la ventana.
 
 Los avisos de mpv llegan desde el hilo que lee la tubería: la interfaz los pasa a JavaFX con `Platform.runLater` y no puede mandar comandos desde ese hilo.

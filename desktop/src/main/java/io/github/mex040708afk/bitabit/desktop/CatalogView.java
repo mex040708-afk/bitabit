@@ -5,11 +5,13 @@ import io.github.mex040708afk.bitabit.core.Contract.Album;
 import io.github.mex040708afk.bitabit.core.Contract.AlbumSummary;
 import io.github.mex040708afk.bitabit.core.Contract.Artist;
 import io.github.mex040708afk.bitabit.core.Contract.ArtistSummary;
+import io.github.mex040708afk.bitabit.core.Contract.Track;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.geometry.Insets;
@@ -44,6 +46,8 @@ final class CatalogView {
     private final Background background;
     private final Covers covers;
     private final Runnable onSessionExpired;
+    /** Pone esas pistas en la cola y empieza por la del índice. */
+    private final BiConsumer<List<Track>, Integer> onPlay;
 
     private final Deque<Page> history = new ArrayDeque<>();
     private final Button back = new Button("← Atrás");
@@ -54,11 +58,13 @@ final class CatalogView {
     /** Sube con cada navegación: una respuesta de una pantalla que ya no se quiere se descarta. */
     private int navigation;
 
-    CatalogView(Catalog catalog, Background background, Covers covers, Runnable onSessionExpired) {
+    CatalogView(Catalog catalog, Background background, Covers covers, Runnable onSessionExpired,
+            BiConsumer<List<Track>, Integer> onPlay) {
         this.catalog = catalog;
         this.background = background;
         this.covers = covers;
         this.onSessionExpired = onSessionExpired;
+        this.onPlay = onPlay;
         back.setOnAction(e -> goBack());
         title.setStyle("-fx-font-size: 18px; -fx-font-weight: bold;");
         title.setMaxWidth(Double.MAX_VALUE);
@@ -167,7 +173,10 @@ final class CatalogView {
         String year = album.getYear().map(y -> " · " + y).orElse("");
         Label info = new Label(artist + year + "\n" + Display.count(album.getTrackCount(), "pista", "pistas")
                 + " · " + Display.duration(album.getDurationMs()));
-        VBox text = new VBox(4, name, info);
+        Button play = new Button("▶ Reproducir");
+        play.setDisable(album.getTracks().isEmpty());
+        play.setOnAction(e -> onPlay.accept(album.getTracks(), 0));
+        VBox text = new VBox(4, name, info, play);
         text.setAlignment(Pos.CENTER_LEFT);
         HBox header = new HBox(14, cover, text);
         header.setPadding(new Insets(0, 12, 8, 12));
@@ -189,6 +198,23 @@ final class CatalogView {
         table.getColumns().add(column("Duración", 90, Display.TrackRow::duration, Pos.CENTER_RIGHT));
         table.getColumns().add(column("Formato", 130, Display.TrackRow::format, Pos.CENTER_LEFT));
         table.getItems().setAll(Display.rows(album));
+        // Las filas van en el mismo orden que las pistas del álbum.
+        Runnable playSelected = () -> {
+            int index = table.getSelectionModel().getSelectedIndex();
+            if (index >= 0) {
+                onPlay.accept(album.getTracks(), index);
+            }
+        };
+        table.setOnMouseClicked(e -> {
+            if (e.getClickCount() == 2) {
+                playSelected.run();
+            }
+        });
+        table.setOnKeyPressed(e -> {
+            if (e.getCode() == javafx.scene.input.KeyCode.ENTER) {
+                playSelected.run();
+            }
+        });
         VBox.setVgrow(table, Priority.ALWAYS);
         return new VBox(header, table);
     }
