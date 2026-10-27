@@ -5,6 +5,16 @@ Prototipo de la fase 1, para Windows. JavaFX pinta la ventana y mpv reproduce el
 - **Escuchar:** suena por la tarjeta. Enseña el formato que da el decodificador y el que mpv manda a Windows, y dice si son iguales. En modo exclusivo (WASAPI) tienen que serlo; en modo compartido Windows lo pasa todo a su formato de mezcla.
 - **Medir:** mpv decodifica la pista sin sonar (`--ao=pcm`) y la app calcula el MD5 de lo que habría mandado a la tarjeta. Lo compara con el MD5 de STREAMINFO del original. Solo con FLAC.
 
+## Código
+
+Todo está en el paquete `io.github.mex040708afk.bitabit.desktop`:
+
+- `Mpv`: un proceso de mpv y su tubería JSON. Las opciones que tocan el audio son siempre las mismas (volumen a 100, sin ReplayGain).
+- `Player`: el reproductor de la app (ADR-020). Un único mpv vivo con `--idle=yes`; `play`, `pause`, `resume`, `togglePause`, `seek`, `stop` y el modo exclusivo, que se cambia sin reiniciar mpv. Avisa a un `Player.Listener` de la posición, la duración, la pausa, los formatos y el fin de cada pista con su motivo (`EndReason`). No conoce la cola. `PlayerEvents` traduce los mensajes de mpv a esos avisos.
+- `Listen` y `Measure`: las dos acciones del prototipo. `App` es la ventana.
+
+Los avisos de mpv llegan desde el hilo que lee la tubería: la interfaz los pasa a JavaFX con `Platform.runLater` y no puede mandar comandos desde ese hilo.
+
 ## Requisitos
 
 - mpv. Con winget: `winget install --id shinchiro.mpv --exact`. La app lo busca en la variable `BITABIT_MPV` y, si no está, en el `PATH`. Por ejemplo, en PowerShell:
@@ -31,7 +41,7 @@ Después:
 ./gradlew run
 ```
 
-Con `BITABIT_MPV` puesta, `build` pasa también las pruebas que hablan con un mpv de verdad.
+Con `BITABIT_MPV` puesta, `build` pasa también las pruebas que hablan con un mpv de verdad. Las del `Player` necesitan además FFmpeg en el `PATH`: generan un tono en una carpeta temporal y lo reproducen con `--ao=null`, sin que suene la tarjeta.
 
 ## Probar
 
