@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mex040708-afk/bitabit/server/internal/auth"
+	"github.com/mex040708-afk/bitabit/server/internal/limits"
 )
 
 // idPattern es el formato de los IDs del contrato: enteros de 1 a 19 cifras, sin
@@ -123,6 +124,8 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 			errorBody:  errorBody{Error: codeBlocked, Message: "Demasiados fallos desde esta IP."},
 			RetryAfter: secs,
 		})
+	case errors.Is(err, auth.ErrBusy):
+		limits.Busy(w, limits.RetryAfterSeconds(auth.VerifyRetryAfter))
 	case errors.Is(err, auth.ErrInvalidDevice):
 		s.badRequest(w, "El nombre del dispositivo tiene de 1 a 64 caracteres.")
 	default:

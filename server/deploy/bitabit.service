@@ -17,6 +17,12 @@ RestartSec=5
 # El HTTP espera hasta 10 s a las peticiones en curso al pararse.
 TimeoutStopSec=30
 
+# Memoria (ADR-040): a partir del 60 % de la RAM del PC el núcleo frena al servicio
+# antes de matarlo, y al 80 % lo para y systemd lo arranca de nuevo. Así una ráfaga
+# (miniaturas con ffmpeg, Argon2id) no deja sin memoria al resto del PC.
+MemoryHigh=60%
+MemoryMax=80%
+
 # Endurecimiento: solo puede escribir en la carpeta de datos.
 # Si BITABIT_DATA_DIR cambia, hay que cambiar también ReadWritePaths.
 # La red no se restringe por IP: en el servidor real escucha a internet.

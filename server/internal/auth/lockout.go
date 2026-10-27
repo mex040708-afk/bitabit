@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/mex040708-afk/bitabit/server/internal/limits"
 )
 
 const (
@@ -24,7 +26,7 @@ type failures struct {
 	blockedUntil time.Time // cero si la IP no está bloqueada
 }
 
-// lockout cuenta los fallos de contraseña por IP. Es seguro para uso concurrente.
+// lockout cuenta los fallos de contraseña por IP (por /64 en IPv6, ver limits.Network). Es seguro para uso concurrente.
 type lockout struct {
 	mu  sync.Mutex
 	ips map[netip.Addr]*failures
@@ -37,6 +39,7 @@ func newLockout() *lockout {
 // blocked dice si ip está bloqueada y cuánto falta para que se desbloquee. Al
 // vencer el bloqueo borra la entrada: la IP vuelve a empezar de cero.
 func (l *lockout) blocked(ip netip.Addr, now time.Time) (time.Duration, bool) {
+	ip = limits.Network(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f, ok := l.ips[ip]
@@ -54,6 +57,7 @@ func (l *lockout) blocked(ip netip.Addr, now time.Time) (time.Duration, bool) {
 // llega al límite ya bloquea la IP: su propia respuesta es el bloqueo, como pide
 // ADR-014 (los nueve primeros responden 401 y el décimo, 429).
 func (l *lockout) failed(ip netip.Addr, now time.Time) (attemptsLeft int, blocked bool) {
+	ip = limits.Network(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f, ok := l.ips[ip]
@@ -75,14 +79,16 @@ func (l *lockout) failed(ip netip.Addr, now time.Time) (attemptsLeft int, blocke
 
 // succeeded borra los fallos de ip: acertar pone su contador a cero.
 func (l *lockout) succeeded(ip netip.Addr) {
+	ip = limits.Network(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.ips, ip)
 }
 
-// evictOldest borra la IP sin bloquear cuyo último fallo es el más antiguo. Las
-// bloqueadas no se borran, porque sería desbloquearlas. Hay que llamarla con el
-// mutex tomado.
+// evictOldest hace sitio en la tabla llena: borra la IP sin bloquear cuyo último fallo
+// es el más antiguo. Si todas están bloqueadas, borra la que antes se desbloquearía de
+// todas formas; sin esto, quien llenara la tabla de IPs bloqueadas la haría crecer sin
+// fin. Hay que llamarla con el mutex tomado.
 func (l *lockout) evictOldest() {
 	var oldest netip.Addr
 	var oldestAt time.Time
@@ -93,6 +99,13 @@ func (l *lockout) evictOldest() {
 		}
 		if !found || f.lastFail.Before(oldestAt) {
 			oldest, oldestAt, found = ip, f.lastFail, true
+		}
+	}
+	if !found {
+		for ip, f := range l.ips {
+			if oldestAt.IsZero() || f.blockedUntil.Before(oldestAt) {
+				oldest, oldestAt, found = ip, f.blockedUntil, true
+			}
 		}
 	}
 	if found {

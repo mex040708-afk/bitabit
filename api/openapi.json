@@ -2,9 +2,9 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Bitabit",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "summary": "API propia de Bitabit: sesión, catálogo, búsqueda y enlaces para escuchar.",
-    "description": "Contrato de la API que usan las apps de Android y de escritorio. El servidor y los clientes lo obedecen; cualquier cambio empieza aquí.\n\n**Convenciones**\n\n- JSON en UTF-8, con nombres en camelCase. Fechas RFC 3339 en UTC, duraciones en milisegundos e IDs enteros de 64 bits.\n- Los campos de las respuestas van siempre. Si un dato no consta es `null`, salvo las etiquetas de texto (artista, álbum), que van como cadena vacía.\n- Los clientes ignoran los campos que no conocen: las versiones compatibles pueden añadir campos, parámetros opcionales y endpoints. Lo incompatible irá en `/api/v2`.\n- El servidor rechaza con 400 los cuerpos con campos desconocidos o de más de 4 KiB. Un método no previsto en una ruta responde 405.\n- Los errores de `/api` son un objeto `Error`. Los de `/media` son texto, porque los pide el reproductor.\n- Todo pide `Authorization: Bearer {token}`, salvo `GET /api/v1/info`, `POST /api/v1/sessions` y `/media`, que lleva su propia firma.",
+    "description": "Contrato de la API que usan las apps de Android y de escritorio. El servidor y los clientes lo obedecen; cualquier cambio empieza aquí.\n\n**Convenciones**\n\n- JSON en UTF-8, con nombres en camelCase. Fechas RFC 3339 en UTC, duraciones en milisegundos e IDs enteros de 64 bits.\n- Los campos de las respuestas van siempre. Si un dato no consta es `null`, salvo las etiquetas de texto (artista, álbum), que van como cadena vacía.\n- Los clientes ignoran los campos que no conocen: las versiones compatibles pueden añadir campos, parámetros opcionales y endpoints. Lo incompatible irá en `/api/v2`.\n- El servidor rechaza con 400 los cuerpos con campos desconocidos o de más de 4 KiB. Un método no previsto en una ruta responde 405.\n- Los errores de `/api` son un objeto `Error`. Los de `/media` son texto, porque los pide el reproductor.\n- Cualquier ruta puede responder `503` («ocupado», cuando se llenan los topes de peticiones a la vez del servidor) o `429` (demasiadas peticiones sin sesión desde una IP), siempre con `Retry-After` en segundos. El cuerpo de estos dos es texto plano, no un `Error`: el cliente solo mira el estado y espera ese tiempo antes de reintentar.\n- Todo pide `Authorization: Bearer {token}`, salvo `GET /api/v1/info`, `POST /api/v1/sessions` y `/media`, que lleva su propia firma.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -104,6 +104,12 @@
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/BlockedError" }
               }
+            }
+          },
+          "503": {
+            "description": "Hay demasiadas comprobaciones de contraseña a la vez (como mucho 2, con 64 MiB cada una). No cuenta como fallo. Espera `Retry-After` segundos y reintenta. Cuerpo de texto plano.",
+            "headers": {
+              "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
             }
           }
         }
