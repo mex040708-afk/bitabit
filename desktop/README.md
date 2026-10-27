@@ -14,6 +14,15 @@ La contraseña no se guarda nunca. Se guardan solo el servidor, el id de la sesi
 
 **Cerrar sesión** la cierra en el servidor y borra el archivo; si el servidor no responde, el archivo se borra igual y la app avisa.
 
+## Catálogo
+
+Con la sesión abierta, la ventana tiene navegación lateral (ADR-026): **Artistas**, **Álbumes** y **Diagnóstico** (el panel del prototipo). Un artista abre sus álbumes en una rejilla con carátulas y un álbum abre su tabla de pistas (número, título, duración `m:ss` o `h:mm:ss`, y formato como `FLAC 24/96` o `MP3 44.1 kHz`). «Atrás» vuelve sin recargar. Los nombres vacíos se pintan como «(sin nombre)» en cursiva y los álbumes sin carátula (o con una que falla) enseñan un marcador.
+
+- Las listas son `ListView`/`TableView`, que solo crean nodos para lo que se ve; la rejilla es un `ListView` de filas de álbumes.
+- Las carátulas se piden en un grupo de hilos aparte, se reducen a 240 px al decodificarlas y se guardan en una caché LRU de 200. Un fallo se apunta en el registro (`System.Logger`) y deja el marcador.
+- Si el servidor responde 401 en cualquier llamada, se borra la sesión guardada y se vuelve al inicio de sesión.
+- Core todavía no pide `?size=256` (API 1.1.0) ni usa `ETag`: se descarga la carátula original.
+
 ## Diagnóstico
 
 Debajo de la sesión sigue el panel del prototipo de la fase 1. Con un enlace firmado del servidor se puede:
@@ -58,7 +67,7 @@ Después (`core` usa el mismo Gradle 9.5, y desde `desktop/` no le hace falta su
 ./gradlew run
 ```
 
-Con `BITABIT_MPV` puesta, `build` pasa también las pruebas que hablan con un mpv de verdad. Las del `Player` necesitan además FFmpeg en el `PATH`: generan un tono en una carpeta temporal y lo reproducen con `--ao=null`, sin que suene la tarjeta. Las de la sesión usan un servidor simulado (`com.sun.net.httpserver`, del JDK) y una carpeta temporal en lugar de `%APPDATA%`.
+Con `BITABIT_MPV` puesta, `build` pasa también las pruebas que hablan con un mpv de verdad. Las del `Player` necesitan además FFmpeg en el `PATH`: generan un tono en una carpeta temporal y lo reproducen con `--ao=null`, sin que suene la tarjeta. Las de la sesión y las del catálogo usan un servidor simulado (`com.sun.net.httpserver`, del JDK) y una carpeta temporal en lugar de `%APPDATA%`.
 
 OkHttp y Okio, que trae `core`, son módulos automáticos y no declaran que necesitan `kotlin.stdlib`; por eso la app arranca con `--add-modules=kotlin.stdlib` (está en `build.gradle.kts`, en `run` y en los scripts de la distribución).
 

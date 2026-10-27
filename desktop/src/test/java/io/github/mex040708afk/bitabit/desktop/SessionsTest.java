@@ -238,6 +238,19 @@ public class SessionsTest {
     }
 
     @Test
+    public void expireDeletesTheFileWithoutCallingTheServer() throws IOException {
+        server.reply("POST /api/v1/sessions", FakeServer.Reply.json(201, LOGIN_OK));
+        Sessions.Active active = sessions.login(server.address(), PASSWORD);
+        int calls = server.received().size();
+
+        sessions.expire(active);
+
+        assertEquals(calls, server.received().size());
+        assertEquals(Optional.empty(), active.client().token());
+        assertEquals(new SessionStore.Missing(), store.load());
+    }
+
+    @Test
     public void deviceNameIsTheComputerName() {
         assertEquals("SOBREMESA", Sessions.deviceName(Map.of("COMPUTERNAME", " SOBREMESA ")));
         assertEquals("Escritorio", Sessions.deviceName(Map.of("COMPUTERNAME", "  ")));
