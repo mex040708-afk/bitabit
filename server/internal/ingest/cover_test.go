@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -343,6 +344,71 @@ func TestRecoverRemovesOldOrphanCovers(t *testing.T) {
 	}
 }
 
+// Un enlace simbólico en entrada/ que apunta fuera de la carpeta de datos no se
+// lee: la fuente va a fallidos/ sin que su destino llegue a ningún proceso (ADR-032).
+func TestImportRefusesASymlinkLeavingTheDataDir(t *testing.T) {
+	e := newImportEnv(t)
+	outside := filepath.Join(t.TempDir(), "secreto.flac")
+	if err := os.WriteFile(outside, []byte("fuera de la carpeta de datos"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := e.path("entrada", "enlace.flac")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
+	}
+
+	res, err := e.im.Import(context.Background(), "enlace.flac")
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if res.Outcome != ingest.Failed || !strings.Contains(res.Reason, "de forma segura") {
+		t.Errorf("resultado %v (%q), want Failed por no abrirse con seguridad", res.Outcome, res.Reason)
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+	if got := readFile(t, outside); string(got) != "fuera de la carpeta de datos" {
+		t.Error("el archivo de fuera cambió")
+	}
+	if exists(t, link) {
+		t.Error("el enlace sigue en entrada/")
+	}
+}
+
+// Un enlace simbólico a una carpeta de fuera: ni la vigilancia la recorre ni Import
+// lee lo que hay dentro (ADR-032).
+func TestInboxAndImportDoNotFollowADirectorySymlinkOut(t *testing.T) {
+	e := newImportEnv(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "a.flac"), []byte("fuera de la carpeta de datos"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, e.path("entrada", "carpeta")); err != nil {
+		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
+	}
+
+	root, err := os.OpenRoot(e.path("entrada"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ready, err := ingest.NewInboxFS(root.FS(), 0).Scan(time.Now())
+	if err != nil || len(ready) != 0 {
+		t.Errorf("Scan = %v, %v; no debía ver nada tras el enlace", ready, err)
+	}
+
+	res, err := e.im.Import(context.Background(), "carpeta/a.flac")
+	if err == nil && res.Outcome == ingest.Imported {
+		t.Fatalf("Import importó algo de fuera: %+v", res)
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+	if got := readFile(t, filepath.Join(outside, "a.flac")); string(got) != "fuera de la carpeta de datos" {
+		t.Error("el archivo de fuera cambió")
+	}
+}
+
 // Solo se borra lo que el importador pudo escribir: ID positivo y jpg o png. Un
 // archivo viejo con otro nombre, una carpeta o un enlace simbólico se quedan.
 func TestRecoverOnlyRemovesFilesShapedLikeCovers(t *testing.T) {
@@ -489,5 +555,64 @@ func TestRecoverDoesNotDeleteWhenTheDatabaseLooksWrong(t *testing.T) {
 	recover()
 	if exists(t, many[0]) {
 		t.Error("una sola carátula sin dueño y vieja, con la base en orden, debía borrarse")
+	}
+}
+
+// Una fuente que pasa del tope fijo de 8 GiB va a fallidos/ con su nota, sin leerse:
+// es un archivo disperso, así que leerlo entero costaría segundos.
+func TestImportSendsAFileOverTheLimitToFailedWithItsNote(t *testing.T) {
+	e := newImportEnv(t)
+	big := e.path("entrada", "enorme.flac")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(9 << 30); err != nil {
+		f.Close()
+		t.Skipf("no se puede crear un archivo disperso de 9 GiB aquí: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	res, err := e.im.Import(context.Background(), "enorme.flac")
+	if err != nil || res.Outcome != ingest.Failed || !strings.Contains(res.Reason, "máximo") {
+		t.Fatalf("Import = %+v, %v; want Failed por el tope", res, err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("tardó %v: parece que se leyó entero", took)
+	}
+	if exists(t, big) {
+		t.Error("el archivo sigue en entrada/")
+	}
+	if !exists(t, e.path("fallidos", "enorme.flac")) || !exists(t, e.path("fallidos", "enorme.flac.error.txt")) {
+		t.Error("faltan el archivo o su nota en fallidos/")
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
+	}
+}
+
+// Cambiar una carpeta de entrada/ por un enlace a otra de la carpeta de datos (como
+// biblioteca/orig) no deja leer ni borrar nada de ahí: el Root de entrada/ lo corta.
+func TestImportDoesNotFollowADirectorySymlinkToTheLibrary(t *testing.T) {
+	e := newImportEnv(t)
+	victim := e.path("biblioteca", "orig", "999.flac")
+	if err := os.WriteFile(victim, []byte("un original de la biblioteca"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(e.path("biblioteca", "orig"), e.path("entrada", "atajo")); err != nil {
+		t.Skipf("no se pueden crear enlaces simbólicos aquí: %v", err)
+	}
+	res, err := e.im.Import(context.Background(), "atajo/999.flac")
+	if err == nil && res.Outcome == ingest.Imported {
+		t.Fatalf("Import importó algo a través del enlace: %+v", res)
+	}
+	if got := readFile(t, victim); string(got) != "un original de la biblioteca" {
+		t.Error("el original de la biblioteca cambió")
+	}
+	if n := countRows(t, e.pool, "tracks"); n != 0 {
+		t.Errorf("hay %d pistas, want 0", n)
 	}
 }
