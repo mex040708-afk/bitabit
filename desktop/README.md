@@ -16,10 +16,11 @@ La contraseña no se guarda nunca. Se guardan solo el servidor, el id de la sesi
 
 ## Catálogo
 
-Con la sesión abierta, la ventana tiene navegación lateral (ADR-026): **Artistas**, **Álbumes** y **Diagnóstico** (el panel del prototipo). Un artista abre sus álbumes en una rejilla con carátulas y un álbum abre su tabla de pistas (número, título, duración `m:ss` o `h:mm:ss`, y formato como `FLAC 24/96` o `MP3 44.1 kHz`). «Atrás» vuelve sin recargar. Los nombres vacíos se pintan como «(sin nombre)» en cursiva y los álbumes sin carátula (o con una que falla) enseñan un marcador.
+Con la sesión abierta, la ventana tiene navegación lateral (ADR-026): **Artistas**, **Álbumes**, **Buscar** y **Diagnóstico** (el panel del prototipo). Un artista abre sus álbumes en una rejilla con carátulas y un álbum abre su tabla de pistas (número, título, duración `m:ss` o `h:mm:ss`, y formato como `FLAC 24/96` o `MP3 44.1 kHz`). «Atrás» vuelve sin recargar. Los nombres vacíos se pintan como «(sin nombre)» en cursiva y los álbumes sin carátula (o con una que falla) enseñan un marcador.
 
 - Las listas son `ListView`/`TableView`, que solo crean nodos para lo que se ve; la rejilla es un `ListView` de filas de álbumes.
 - Las carátulas se piden en un grupo de hilos aparte, se reducen a 240 px al decodificarlas y se guardan en una caché LRU de 200. Un fallo se apunta en el registro (`System.Logger`) y deja el marcador.
+- **Buscar** pregunta al servidor 300 ms después de la última tecla, o al pulsar Intro, y enseña una pestaña por tipo con resultados: artistas, álbumes y pistas. Una pista abre su álbum con doble clic o Intro. Si llega tarde la respuesta de una búsqueda anterior, se descarta. «Atrás» vuelve a la búsqueda con el texto y los resultados.
 - Si el servidor responde 401 en cualquier llamada, se borra la sesión guardada y se vuelve al inicio de sesión.
 - Core todavía no pide `?size=256` (API 1.1.0) ni usa `ETag`: se descarga la carátula original.
 

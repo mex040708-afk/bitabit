@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import io.github.mex040708afk.bitabit.core.Contract.Album;
+import io.github.mex040708afk.bitabit.core.Contract.Track;
 import io.github.mex040708afk.bitabit.core.Json;
 import java.util.List;
 import org.junit.Test;
@@ -91,6 +92,21 @@ public class DisplayTest {
         Album album = Json.fromJson("{\"id\":1,\"title\":\"\",\"tracks\":[{\"id\":9,\"title\":\"\","
                 + "\"durationMs\":1000,\"files\":[]}]}", Album.class);
         assertEquals(new Display.TrackRow("–", Display.UNNAMED, "0:01", ""), Display.rows(album).get(0));
+    }
+
+    @Test
+    public void foundTrackShowsItsArtistAndAlbum() {
+        Track track = Json.fromJson("{\"id\":9,\"title\":\" Blue in Green \",\"artist\":\"Miles Davis\","
+                + "\"album\":{\"id\":7,\"title\":\"Kind of Blue\"},\"durationMs\":337000,\"files\":[]}", Track.class);
+        assertEquals(new Display.FoundTrackRow("Blue in Green", "Miles Davis", "Kind of Blue", "5:37"),
+                Display.foundRow(track));
+    }
+
+    @Test
+    public void foundTrackWithEmptyNamesStillPaints() {
+        Track track = Json.fromJson("{\"id\":9,\"title\":\"\",\"artist\":\"\",\"durationMs\":1000}", Track.class);
+        assertEquals(new Display.FoundTrackRow(Display.UNNAMED, Display.UNNAMED, Display.UNNAMED, "0:01"),
+                Display.foundRow(track));
     }
 
     private static Album album(String... tracks) {
