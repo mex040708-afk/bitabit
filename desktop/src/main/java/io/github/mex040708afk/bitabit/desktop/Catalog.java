@@ -3,6 +3,7 @@ package io.github.mex040708afk.bitabit.desktop;
 import io.github.mex040708afk.bitabit.core.ApiException;
 import io.github.mex040708afk.bitabit.core.BitabitClient;
 import io.github.mex040708afk.bitabit.core.BitabitClient.AlbumSort;
+import io.github.mex040708afk.bitabit.core.BitabitClient.Quality;
 import io.github.mex040708afk.bitabit.core.Contract.Album;
 import io.github.mex040708afk.bitabit.core.Contract.AlbumSummary;
 import io.github.mex040708afk.bitabit.core.Contract.Artist;
@@ -108,6 +109,20 @@ final class Catalog {
             required(result.getAlbums(), "los álbumes encontrados");
             required(result.getTracks(), "las pistas encontradas");
             return result;
+        });
+    }
+
+    /**
+     * La URL firmada de una versión de la pista, pedida justo antes de cargarla porque caduca.
+     * Lleva la firma: no se enseña ni se registra.
+     */
+    String link(long trackId, Quality quality) throws IOException {
+        return call("el enlace de la pista", () -> {
+            String path = required(client.link(trackId, quality).getPath(), "la ruta del enlace");
+            if (!path.startsWith("/media/")) {
+                throw new IOException("el enlace no es una ruta /media/");
+            }
+            return server + path;
         });
     }
 

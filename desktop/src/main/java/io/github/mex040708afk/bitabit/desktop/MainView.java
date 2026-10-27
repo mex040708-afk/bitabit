@@ -15,8 +15,8 @@ import javafx.scene.layout.VBox;
 
 /**
  * La ventana principal (ADR-026): navegación lateral (artistas, álbumes, búsqueda y el
- * panel de diagnóstico del prototipo), el contenido al lado y, abajo del menú, la sesión con
- * «Cerrar sesión». La barra de reproducción llegará en otra tarea.
+ * panel de diagnóstico del prototipo), el contenido al lado, abajo del menú la sesión con
+ * «Cerrar sesión» y, debajo de todo, la barra de reproducción.
  */
 final class MainView {
 
@@ -31,6 +31,9 @@ final class MainView {
     private final ToggleButton diagnosis = new ToggleButton("Diagnóstico");
     private final ToggleGroup group = new ToggleGroup();
     private CatalogView catalog;
+    /** Se llama al entrar en el diagnóstico, que arranca su propio mpv. */
+    private Runnable onDiagnosis = () -> {
+    };
 
     MainView(Node diagnostics, Runnable onLogout) {
         this.diagnostics = diagnostics;
@@ -71,6 +74,7 @@ final class MainView {
         });
         diagnosis.setOnAction(e -> {
             if (diagnosis.isSelected()) {
+                onDiagnosis.run();
                 root.setCenter(this.diagnostics);
             }
         });
@@ -88,8 +92,14 @@ final class MainView {
         return root;
     }
 
-    /** Empieza una sesión: enseña los artistas. */
-    void open(String address, CatalogView catalogView) {
+    /**
+     * Empieza una sesión: enseña los artistas y la barra de reproducción.
+     *
+     * @param onDiagnosis se llama al entrar en el diagnóstico
+     */
+    void open(String address, CatalogView catalogView, PlayerBar bar, Runnable onDiagnosis) {
+        this.onDiagnosis = onDiagnosis;
+        root.setBottom(bar.root());
         server.setText("Sesión en " + address);
         message("");
         catalog = catalogView;

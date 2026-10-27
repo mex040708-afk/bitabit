@@ -19,7 +19,7 @@ import java.util.OptionalDouble;
  * llamar desde cualquier hilo salvo desde el {@link Listener}. El enlace de la
  * pista nunca sale en un mensaje ni en una excepción: lleva la firma.
  */
-final class Player implements AutoCloseable {
+final class Player implements AutoCloseable, Playback.Engine {
 
     /**
      * El estado de la reproducción. Todo llega desde el hilo que lee la
@@ -95,7 +95,7 @@ final class Player implements AutoCloseable {
     }
 
     /** Carga la pista en lugar de la que suene y la reproduce. */
-    void play(String url) throws IOException, InterruptedException {
+    public void play(String url) throws IOException, InterruptedException {
         if (url == null || url.isBlank()) {
             throw new IllegalArgumentException("la pista no tiene enlace");
         }
@@ -103,20 +103,20 @@ final class Player implements AutoCloseable {
         command("cargar " + describe(url), "loadfile", url, "replace");
     }
 
-    void pause() throws IOException, InterruptedException {
+    public void pause() throws IOException, InterruptedException {
         command("pausar", "set", "pause", "yes");
     }
 
-    void resume() throws IOException, InterruptedException {
+    public void resume() throws IOException, InterruptedException {
         command("reanudar", "set", "pause", "no");
     }
 
-    void togglePause() throws IOException, InterruptedException {
+    public void togglePause() throws IOException, InterruptedException {
         command("pausar o reanudar", "cycle", "pause");
     }
 
     /** Salta a ese segundo de la pista. */
-    void seek(double seconds) throws IOException, InterruptedException {
+    public void seek(double seconds) throws IOException, InterruptedException {
         if (!Double.isFinite(seconds) || seconds < 0) {
             throw new IllegalArgumentException("posición no válida: " + seconds);
         }
@@ -132,7 +132,7 @@ final class Player implements AutoCloseable {
      * Cambia el modo exclusivo sin reiniciar mpv: al cambiar la opción, mpv
      * vuelve a abrir la salida de audio y la pista sigue donde estaba.
      */
-    void setExclusive(boolean exclusive) throws IOException, InterruptedException {
+    public void setExclusive(boolean exclusive) throws IOException, InterruptedException {
         command("cambiar el modo exclusivo", "set", "audio-exclusive", flag(exclusive));
         this.exclusive = exclusive;
     }
