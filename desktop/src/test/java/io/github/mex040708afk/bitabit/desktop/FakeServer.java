@@ -26,7 +26,8 @@ final class FakeServer implements AutoCloseable {
         }
     }
 
-    record Received(String method, String path, Optional<String> authorization, String body) {
+    /** {@code query} va ya decodificada, sin el {@code ?}. */
+    record Received(String method, String path, Optional<String> query, Optional<String> authorization, String body) {
     }
 
     private final HttpServer server;
@@ -62,7 +63,7 @@ final class FakeServer implements AutoCloseable {
             String method = exchange.getRequestMethod();
             String path = exchange.getRequestURI().getPath();
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            received.add(new Received(method, path,
+            received.add(new Received(method, path, Optional.ofNullable(exchange.getRequestURI().getQuery()),
                     Optional.ofNullable(exchange.getRequestHeaders().getFirst("Authorization")), body));
             Reply reply = replies.getOrDefault(method + " " + path,
                     Reply.json(404, "{\"error\":\"not_found\",\"message\":\"no existe\"}"));

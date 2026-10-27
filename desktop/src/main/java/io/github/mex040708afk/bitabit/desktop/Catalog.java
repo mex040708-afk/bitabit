@@ -8,6 +8,7 @@ import io.github.mex040708afk.bitabit.core.Contract.Album;
 import io.github.mex040708afk.bitabit.core.Contract.AlbumSummary;
 import io.github.mex040708afk.bitabit.core.Contract.Artist;
 import io.github.mex040708afk.bitabit.core.Contract.ArtistSummary;
+import io.github.mex040708afk.bitabit.core.Contract.SearchResult;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
@@ -29,6 +30,36 @@ final class Catalog {
         SessionExpired(ApiException cause) {
             super("La sesión ha caducado.", cause);
         }
+    }
+
+    /** Resultados de cada tipo que se piden en una búsqueda: los que da la API por defecto. */
+    static final int SEARCH_LIMIT = 20;
+    /** Lo más largo que admite la API, en caracteres, ya quitados los espacios de los extremos. */
+    static final int MAX_QUERY_CHARS = 100;
+
+    /** Lo que se hace con el texto del campo de búsqueda. */
+    sealed interface Query {
+
+        /** No queda nada que buscar: se limpian los resultados. */
+        record Empty() implements Query {
+        }
+
+        /** Más largo de lo que admite la API: se avisa sin llamar al servidor. */
+        record TooLong(int chars) implements Query {
+        }
+
+        record Text(String text) implements Query {
+        }
+    }
+
+    /** Decide qué hacer con lo que se ha escrito, con las mismas reglas que core y la API. */
+    static Query query(String typed) {
+        String text = typed == null ? "" : typed.trim();
+        int chars = text.codePointCount(0, text.length());
+        if (chars == 0) {
+            return new Query.Empty();
+        }
+        return chars > MAX_QUERY_CHARS ? new Query.TooLong(chars) : new Query.Text(text);
     }
 
     @FunctionalInterface
@@ -67,6 +98,17 @@ final class Catalog {
             Album album = client.album(albumId);
             required(album.getTracks(), "las pistas del álbum");
             return album;
+        });
+    }
+
+    /** Artistas, álbumes y pistas parecidos a {@code text}, que ya viene de {@link #query}. */
+    SearchResult search(String text) throws IOException {
+        return call("la búsqueda", () -> {
+            SearchResult result = client.search(text, SEARCH_LIMIT);
+            required(result.getArtists(), "los artistas encontrados");
+            required(result.getAlbums(), "los álbumes encontrados");
+            required(result.getTracks(), "las pistas encontradas");
+            return result;
         });
     }
 

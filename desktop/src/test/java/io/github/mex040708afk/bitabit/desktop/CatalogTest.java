@@ -14,6 +14,7 @@ import io.github.mex040708afk.bitabit.core.Contract.Album;
 import io.github.mex040708afk.bitabit.core.Contract.AlbumSummary;
 import io.github.mex040708afk.bitabit.core.Contract.Artist;
 import io.github.mex040708afk.bitabit.core.Contract.ArtistSummary;
+import io.github.mex040708afk.bitabit.core.Contract.SearchResult;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -114,6 +115,53 @@ public class CatalogTest {
 
         assertTrue(e.getMessage(), e.getMessage().startsWith("No se pudo cargar el enlace de la pista."));
         assertFalse(e.getMessage(), e.getMessage().contains("sig"));
+    }
+
+    @Test
+    public void searchesWithTheTextAndTheLimit() throws IOException {
+        server.reply("GET /api/v1/search", FakeServer.Reply.json(200,
+                "{\"artists\":[{\"id\":4,\"name\":\"Miles\",\"albumCount\":1}],\"albums\":[" + ALBUM + "],"
+                        + "\"tracks\":[{\"id\":1,\"title\":\"T\",\"artist\":\"Miles\",\"album\":{\"id\":7,\"title\":\"\"},"
+                        + "\"durationMs\":1000,\"files\":[]}]}"));
+
+        SearchResult result = catalog.search("miles dávis");
+
+        assertEquals(1, result.getArtists().size());
+        assertEquals(1, result.getAlbums().size());
+        assertEquals(7, result.getTracks().get(0).getAlbum().getId());
+        FakeServer.Received request = server.received().get(0);
+        assertEquals(Optional.of("q=miles dávis&limit=" + Catalog.SEARCH_LIMIT), request.query());
+        assertEquals(Optional.of("Bearer " + TOKEN), request.authorization());
+    }
+
+    @Test
+    public void aSearchWithoutOneOfItsListsIsAnError() {
+        server.reply("GET /api/v1/search", FakeServer.Reply.json(200, "{\"artists\":[],\"albums\":[]}"));
+
+        IOException e = assertThrows(IOException.class, () -> catalog.search("x"));
+
+        assertTrue(e.getMessage(), e.getMessage().startsWith("No se pudo cargar la búsqueda."));
+        assertTrue(e.getMessage(), e.getMessage().contains("pistas encontradas"));
+    }
+
+    @Test
+    public void anExpiredSessionWhileSearching() {
+        server.reply("GET /api/v1/search", FakeServer.Reply.json(401,
+                "{\"error\":\"unauthorized\",\"message\":\"token no válido\"}"));
+
+        assertThrows(Catalog.SessionExpired.class, () -> catalog.search("x"));
+    }
+
+    @Test
+    public void whatToDoWithTheTypedText() {
+        assertEquals(new Catalog.Query.Empty(), Catalog.query(""));
+        assertEquals(new Catalog.Query.Empty(), Catalog.query("   \t"));
+        assertEquals(new Catalog.Query.Empty(), Catalog.query(null));
+        assertEquals(new Catalog.Query.Text("beatles"), Catalog.query("  beatles "));
+        assertEquals(new Catalog.Query.Text("a".repeat(100)), Catalog.query(" " + "a".repeat(100) + " "));
+        assertEquals(new Catalog.Query.TooLong(101), Catalog.query("a".repeat(101)));
+        // Se cuentan caracteres, no unidades de UTF-16: 100 emojis caben.
+        assertEquals(new Catalog.Query.Text("🎵".repeat(100)), Catalog.query("🎵".repeat(100)));
     }
 
     @Test
