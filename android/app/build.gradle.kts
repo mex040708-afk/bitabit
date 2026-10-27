@@ -23,6 +23,9 @@ android {
         release {
             optimization {
                 enable = false
+                keepRules {
+                    files.add(file("proguard-rules.pro"))
+                }
             }
         }
     }
@@ -34,6 +37,9 @@ android {
 }
 
 dependencies {
+    implementation(libs.bitabit.core)
+    implementation(libs.appcompat)
+    implementation(libs.fragment)
     implementation(libs.media3.exoplayer)
     testImplementation(libs.junit)
 }

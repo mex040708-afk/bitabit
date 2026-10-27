@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Fase 1 (ADR-012): HTTP sin cifrar solo hacia el servidor de pruebas local.
-     Se quita cuando el servidor tenga HTTPS. -->
+     Se quita cuando el servidor tenga HTTPS. La sesión (ADR-021) manda el token por aquí:
+     qué hacer con el servidor de la red de casa se decide al desplegar, no abriendo el
+     HTTP sin cifrar a cualquier dirección. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">
